@@ -1,0 +1,227 @@
+{
+    "flow_api_url": {
+        "description": "【Flow模式】API地址",
+        "type": "string",
+        "hint": "Flow模式(OpenAI格式)专用，支持翻译和多图。",
+        "default": "http://localhost:8000/v1/chat/completions"
+    },
+    "flow_api_key": {
+        "description": "【Flow模式】API Key",
+        "type": "string",
+        "hint": "Flow模式使用的API密钥。",
+        "default": ""
+    },
+    "flow_default_model": {
+        "description": "【Flow模式】默认模型",
+        "type": "string",
+        "hint": "Flow模式默认使用的模型ID（横版），会根据图片比例自动切换。",
+        "default": "gemini-3.0-pro-image-landscape"
+    },
+    "flow_model_list": {
+        "description": "【Flow模式】可用模型列表",
+        "type": "list",
+        "hint": "Flow模式可切换的模型列表，会根据图片比例自动选择横版/竖版。",
+        "items": {
+            "type": "string"
+        },
+        "default": [
+            "gemini-3.0-pro-image-landscape",
+            "gemini-3.0-pro-image-portrait"
+        ]
+    },
+    "flow_enable_translate": {
+        "description": "【Flow模式】启用翻译",
+        "type": "bool",
+        "hint": "开启后自动将中文提示词翻译为英文。",
+        "default": false
+    },
+    "flow_baidu_appid": {
+        "description": "【Flow模式】百度翻译AppID",
+        "type": "string",
+        "default": "",
+        "condition": {
+            "flow_enable_translate": true
+        }
+    },
+    "flow_baidu_key": {
+        "description": "【Flow模式】百度翻译密钥",
+        "type": "string",
+        "default": "",
+        "condition": {
+            "flow_enable_translate": true
+        }
+    },
+    "generic_api_url": {
+        "description": "【Generic模式】API地址",
+        "type": "string",
+        "hint": "Generic模式(OpenAI通用格式)专用。",
+        "default": "https://api.bltcy.ai/v1/chat/completions"
+    },
+    "generic_api_keys": {
+        "description": "【Generic模式】API Key池",
+        "type": "list",
+        "hint": "Generic模式Key池，支持轮询。",
+        "items": {
+            "type": "string"
+        },
+        "default": []
+    },
+    "generic_default_model": {
+        "description": "【Generic模式】默认模型",
+        "type": "string",
+        "default": "nano-banana"
+    },
+    "gemini_api_url": {
+        "description": "【Gemini模式】API地址",
+        "type": "string",
+        "hint": "Gemini官方API地址。",
+        "default": "https://generativelanguage.googleapis.com"
+    },
+    "gemini_api_keys": {
+        "description": "【Gemini模式】API Key池",
+        "type": "list",
+        "hint": "Gemini模式Key池，支持轮询。",
+        "items": {
+            "type": "string"
+        },
+        "default": []
+    },
+    "gemini_default_model": {
+        "description": "【Gemini模式】默认模型",
+        "type": "string",
+        "default": "gemini-3-pro-image-preview"
+    },
+    "gemini_resolution": {
+        "description": "【Gemini模式】输出分辨率",
+        "type": "string",
+        "hint": "Gemini官方API支持的输出分辨率。4K可获得最高质量。",
+        "default": "4K",
+        "options": [
+            "1K",
+            "2K",
+            "4K"
+        ]
+    },
+    "default_mode": {
+        "description": "【通用】默认API模式",
+        "type": "string",
+        "hint": "白名单用户使用无前缀命令时的默认模式。",
+        "default": "generic",
+        "options": [
+            "flow",
+            "generic",
+            "gemini"
+        ]
+    },
+    "daily_limit": {
+        "description": "【次数】每日限制次数",
+        "type": "int",
+        "hint": "每个用户每日可使用的次数。白名单用户无限制。",
+        "default": 5
+    },
+    "custom_limits": {
+        "description": "【次数】自定义用户额度",
+        "type": "text",
+        "editor_mode": true,
+        "editor_language": "json",
+        "hint": "JSON格式: {\"用户ID\": 次数}",
+        "default": "{}"
+    },
+    "user_whitelist": {
+        "description": "【权限】用户白名单",
+        "type": "list",
+        "hint": "白名单用户无任何限制，可使用所有模式。",
+        "items": {
+            "type": "string"
+        },
+        "default": []
+    },
+    "group_whitelist": {
+        "description": "【权限】群聊白名单",
+        "type": "list",
+        "hint": "白名单群聊可使用所有模式，但受次数限制。",
+        "items": {
+            "type": "string"
+        },
+        "default": []
+    },
+    "enable_llm_tool": {
+        "description": "【LLM】注册为LLM工具",
+        "type": "bool",
+        "hint": "开启后可通过对话让AI调用绘图功能。",
+        "default": false
+    },
+    "llm_default_mode": {
+        "description": "【LLM】白名单用户默认模式",
+        "type": "string",
+        "hint": "白名单用户/群聊调用LLM工具时使用的模式。普通用户固定使用flow模式。",
+        "default": "generic",
+        "options": [
+            "flow",
+            "generic",
+            "gemini"
+        ]
+    },
+    "enable_auto_recall": {
+        "description": "【撤回】启用自动撤回",
+        "type": "bool",
+        "hint": "开启后，非图片消息（提示、报错等）会自动撤回。",
+        "default": false
+    },
+    "auto_recall_delay": {
+        "description": "【撤回】撤回延迟(秒)",
+        "type": "int",
+        "hint": "自动撤回的延迟时间，不填默认15秒。",
+        "default": 15
+    },
+    "debug_mode": {
+        "description": "【调试】启用调试模式",
+        "type": "bool",
+        "hint": "开启后会在日志中输出详细的API请求和响应信息，便于排查问题。",
+        "default": false
+    },
+    "flow_use_proxy": {
+        "description": "【Flow模式】启用代理",
+        "type": "bool",
+        "hint": "Flow模式是否使用代理。",
+        "default": false
+    },
+    "generic_use_proxy": {
+        "description": "【Generic模式】启用代理",
+        "type": "bool",
+        "hint": "Generic模式是否使用代理。",
+        "default": false
+    },
+    "gemini_use_proxy": {
+        "description": "【Gemini模式】启用代理",
+        "type": "bool",
+        "hint": "Gemini模式是否使用代理。",
+        "default": true
+    },
+    "proxy_url": {
+        "description": "【网络】代理地址",
+        "type": "string",
+        "hint": "格式: http://172.17.0.1:7890",
+        "default": "http://172.17.0.1:7890"
+    },
+    "timeout": {
+        "description": "【网络】请求超时(秒)",
+        "type": "int",
+        "default": 120
+    },
+    "prompt_list": {
+        "description": "【预设】提示词预设列表",
+        "type": "list",
+        "hint": "格式: 触发词:提示词内容",
+        "items": {
+            "type": "string"
+        },
+        "default": []
+    },
+    "help_text": {
+        "description": "【帮助】帮助文本",
+        "type": "text",
+        "editor_mode": true,
+        "default": "🎨 RongheDraw 绘图插件\n\n━━ 快速开始 ━━\n#f文生图 <描述>  文字生成图片\n#f图生图 [图片]  图片风格转换\n#f手办化 [图片]  手办化效果\n\n━━ API模式 ━━\nf = Flow (支持翻译，所有用户可用)\no = Generic (仅白名单)\ng = Gemini (仅白名单)\n\n示例: #o文 <描述>  #g图 [图片]\n\n━━ 权限 ━━\n普通用户: 仅 #f 命令\n白名单: 所有模式\n\n━━ 其他 ━━\n#查询次数 | #lm列表 | #f切换模型"
+    }
+}
