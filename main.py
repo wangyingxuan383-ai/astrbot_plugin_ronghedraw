@@ -834,7 +834,66 @@ class Main(Star):
                 async for r in do_generate():
                     yield r
     
+    # ================== 自定义预设命令监听器 ==================
+    
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=5)
+    async def on_custom_preset(self, event: AstrMessageEvent, ctx=None):
+        """处理自定义预设命令（从prompt_list配置加载的预设）"""
+        # 检查是否需要前缀
+        if self.config.get("prefix", True) and not event.is_at_or_wake_command:
+            return
+        
+        text = event.message_str.strip()
+        if not text:
+            return
+        
+        # 提取命令词（第一个token）
+        tokens = text.split()
+        if not tokens:
+            return
+        
+        raw_cmd = tokens[0].strip()
+        
+        # 解析命令前缀 (f/o/g) 和基础命令
+        prefix_mode = None
+        base_cmd = raw_cmd
+        
+        if len(raw_cmd) > 1:
+            first_char = raw_cmd[0].lower()
+            if first_char in ('f', 'o', 'g'):
+                # 检查去掉前缀后的命令是否在自定义预设中
+                potential_cmd = raw_cmd[1:]
+                if potential_cmd in self.prompt_map:
+                    prefix_mode = {"f": "flow", "o": "generic", "g": "gemini"}.get(first_char)
+                    base_cmd = potential_cmd
+        
+        # 检查是否匹配自定义预设（排除已硬编码的内置预设命令）
+        if base_cmd not in self.prompt_map:
+            return  # 不是自定义预设，让其他处理器处理
+        
+        # 排除内置预设（它们有专门的@filter.command装饰器）
+        if base_cmd in self.builtin_presets:
+            return  # 内置预设由专门的命令处理器处理
+        
+        # 是自定义预设，处理它
+        user_id = event.get_sender_id()
+        group_id = event.get_group_id()
+        
+        # 确定使用的模式
+        if prefix_mode:
+            mode = prefix_mode
+        else:
+            mode = self._get_effective_mode(None, user_id, group_id)
+        
+        # 调用预设处理
+        async for r in self._handle_preset(event, mode, base_cmd):
+            yield r
+        
+        # 停止事件传播
+        event.stop_event()
+    
     # ================== 预设命令 ==================
+
     
     @filter.command("f手办化", prefix_optional=True)
     async def cmd_flow_figurine(self, event: AstrMessageEvent):
@@ -1100,10 +1159,17 @@ g = Gemini (仅白名单, 4K输出)
             return
         
         mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini"}[actual_mode]
-        yield event.plain_result(f"🤖 [LLM-{mode_name}] 正在生成: {prompt[:30]}...")
+        
+        # 获取消息中的图片（支持图生图）
+        images = await self.get_images(event)
+        
+        if images:
+            yield event.plain_result(f"🤖 [LLM-{mode_name}] 图生图: {prompt[:30]}...")
+        else:
+            yield event.plain_result(f"🤖 [LLM-{mode_name}] 文生图: {prompt[:30]}...")
         
         start = time.time()
-        success, result = await self.generate(actual_mode, [], prompt)
+        success, result = await self.generate(actual_mode, images, prompt)
         elapsed = time.time() - start
         
         if success:
