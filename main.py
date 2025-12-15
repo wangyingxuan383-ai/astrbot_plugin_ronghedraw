@@ -841,8 +841,11 @@ class Main(Star):
     async def on_custom_preset(self, event: AstrMessageEvent, ctx=None):
         """处理自定义预设命令（从prompt_list配置加载的预设）"""
         # 检查是否需要前缀
-        if self.config.get("prefix", True) and not event.is_at_or_wake_command:
-            return
+        if self.config.get("prefix", True):
+            # 兼容不同版本AstrBot
+            is_wake = getattr(event, 'is_at_or_wake_command', True)
+            if not is_wake:
+                return
         
         text = event.message_str.strip()
         if not text:
@@ -1184,7 +1187,7 @@ g = Gemini (仅白名单, 4K输出)
     # ================== 自动撤回 ==================
     
     @filter.after_message_sent()
-    async def after_message_sent(self, event: AstrMessageEvent):
+    async def after_message_sent(self, event: AstrMessageEvent, ctx=None):
         """消息发送后钩子 - 实现自动撤回"""
         if not self.config.get("enable_auto_recall", False):
             return
