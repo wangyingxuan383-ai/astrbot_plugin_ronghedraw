@@ -136,8 +136,8 @@ class Main(Star):
         avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
         return await self._download_image(avatar_url)
     
-    def _extract_first_frame(self, raw: bytes) -> bytes:
-        """提取GIF第一帧"""
+    def _extract_first_frame_sync(self, raw: bytes) -> bytes:
+        """提取GIF第一帧（同步方法，供线程池调用）"""
         if PILImage is None:
             return raw
         try:
@@ -148,7 +148,7 @@ class Main(Star):
             out = io.BytesIO()
             img.save(out, format="JPEG", quality=85)
             return out.getvalue()
-        except:
+        except Exception:
             return raw
     
     async def _load_image_bytes(self, src: str) -> bytes | None:
@@ -158,7 +158,8 @@ class Main(Star):
         elif src.startswith("http"):
             raw = await self._download_image(src)
             if raw:
-                return self._extract_first_frame(raw)
+                # 使用线程池执行CPU密集型操作
+                return await asyncio.to_thread(self._extract_first_frame_sync, raw)
         elif src.startswith("base64://"):
             try:
                 return base64.b64decode(src[9:])

@@ -7,20 +7,49 @@ import datetime
 import os
 import json
 
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.join(CURRENT_DIR, "user_usage_data.db")
+# 使用标准数据目录（符合AstrBot规范）
+_db_file = None
+_db_initialized = False
+
+
+def _get_db_file():
+    """获取数据库文件路径（延迟初始化）"""
+    global _db_file
+    if _db_file is None:
+        try:
+            from astrbot.api.star import StarTools
+            data_dir = StarTools.get_data_dir("astrbot_plugin_ronghedraw")
+            _db_file = os.path.join(str(data_dir), "user_usage_data.db")
+        except Exception:
+            # 回退到插件目录（兼容旧版本）
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            _db_file = os.path.join(current_dir, "user_usage_data.db")
+    return _db_file
 
 
 def _init_db():
-    conn = sqlite3.connect(DB_FILE)
+    """初始化数据库（延迟调用）"""
+    global _db_initialized
+    if _db_initialized:
+        return
+    
+    db_file = _get_db_file()
+    # 确保目录存在
+    os.makedirs(os.path.dirname(db_file), exist_ok=True)
+    
+    conn = sqlite3.connect(db_file)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS usage_stats
                  (user_id TEXT PRIMARY KEY, count INTEGER, last_date TEXT)''')
     conn.commit()
     conn.close()
+    _db_initialized = True
 
 
-_init_db()
+def _get_connection():
+    """获取数据库连接"""
+    _init_db()
+    return sqlite3.connect(_get_db_file())
 
 
 def _parse_list(raw_list):
@@ -100,7 +129,7 @@ def check_and_consume(user_id: str, group_id: str, config: dict) -> tuple:
     user_limit = custom_limits.get(user_id, daily_limit)
     
     today_str = datetime.date.today().isoformat()
-    conn = sqlite3.connect(DB_FILE)
+    conn = _get_connection()
     c = conn.cursor()
     
     c.execute("SELECT count, last_date FROM usage_stats WHERE user_id=?", (user_id,))
@@ -140,7 +169,7 @@ def get_user_remaining(user_id: str, config: dict) -> str:
     user_limit = custom_limits.get(user_id, daily_limit)
     
     today_str = datetime.date.today().isoformat()
-    conn = sqlite3.connect(DB_FILE)
+    conn = _get_connection()
     c = conn.cursor()
     
     c.execute("SELECT count, last_date FROM usage_stats WHERE user_id=?", (user_id,))
