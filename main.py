@@ -163,13 +163,13 @@ class Main(Star):
         elif src.startswith("base64://"):
             try:
                 return base64.b64decode(src[9:])
-            except:
+            except Exception:
                 pass
         elif src.startswith("data:"):
             try:
                 b64 = src.split(",", 1)[1]
                 return base64.b64decode(b64)
-            except:
+            except Exception:
                 pass
         return None
     
@@ -395,7 +395,7 @@ class Main(Star):
                                     delta = chunk["choices"][0].get("delta", {})
                                     if "content" in delta:
                                         full_content += delta["content"]
-                            except:
+                            except Exception:
                                 pass
                     
                     # 提取图片URL
@@ -482,7 +482,7 @@ class Main(Star):
                         try:
                             b64 = b64_match.group(0).split(",")[1]
                             return True, base64.b64decode(b64)
-                        except:
+                        except Exception:
                             pass
                     
                     url_match = re.search(r'https?://[^\s<>")\\]]+', full_content)
@@ -584,7 +584,7 @@ class Main(Star):
                                 if "inlineData" in part:
                                     b64 = part["inlineData"]["data"]
                                     return True, base64.b64decode(b64)
-                    except:
+                    except Exception:
                         pass
                     
                     return False, f"未找到图片: {str(data)[:200]}"
@@ -1191,9 +1191,7 @@ g = Gemini (仅白名单, 4K输出)
         Args:
             qq_number (string): QQ号码，纯数字字符串
         '''
-        if not self.config.get("enable_llm_tool", False):
-            yield event.plain_result("LLM 绘图工具未启用")
-            return
+        # 获取头像是通用功能，不受绘图开关限制
         
         qq_number = str(qq_number).strip()
         if not qq_number.isdigit():
