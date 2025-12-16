@@ -174,7 +174,7 @@ class Main(Star):
         return None
     
     async def get_images(self, event: AstrMessageEvent) -> List[bytes]:
-        """获取消息中的所有图片（支持多图）"""
+        """获取消息中的所有图片（支持多图，合并回复图片、当前消息图片、@用户头像）"""
         images: List[bytes] = []
         at_users: List[str] = []
         
@@ -200,18 +200,17 @@ class Main(Star):
                 elif hasattr(seg, 'base64') and seg.base64:
                     try:
                         images.append(base64.b64decode(seg.base64))
-                    except:
+                    except Exception:
                         pass
         
-        # 3. @用户头像（仅当没有图片时）
-        if not images:
-            for seg in chain:
-                if isinstance(seg, At):
-                    at_users.append(str(seg.qq))
-            
-            for uid in at_users:
-                if avatar := await self._get_avatar(uid):
-                    images.append(avatar)
+        # 3. @用户头像（始终收集，与其他图片合并）
+        for seg in chain:
+            if isinstance(seg, At):
+                at_users.append(str(seg.qq))
+        
+        for uid in at_users:
+            if avatar := await self._get_avatar(uid):
+                images.append(avatar)
         
         return images
     
@@ -1183,6 +1182,32 @@ g = Gemini (仅白名单, 4K输出)
             ])
         else:
             yield event.plain_result(f"❌ [LLM-{mode_name}] 生成失败 ({elapsed:.1f}s)\n原因: {result}")
+    
+    @filter.llm_tool(name="get_avatar")
+    async def llm_tool_get_avatar(self, event: AstrMessageEvent, qq_number: str):
+        '''
+        通过QQ号获取用户头像图片。用于获取指定用户的头像进行绘图或展示。
+        
+        Args:
+            qq_number (string): QQ号码，纯数字字符串
+        '''
+        if not self.config.get("enable_llm_tool", False):
+            yield event.plain_result("LLM 绘图工具未启用")
+            return
+        
+        qq_number = str(qq_number).strip()
+        if not qq_number.isdigit():
+            yield event.plain_result(f"❌ 无效的QQ号: {qq_number}")
+            return
+        
+        avatar = await self._get_avatar(qq_number)
+        if avatar:
+            yield event.chain_result([
+                Image.fromBytes(avatar),
+                Plain(f"✅ 已获取用户 {qq_number} 的头像")
+            ])
+        else:
+            yield event.plain_result(f"❌ 获取头像失败: {qq_number}")
     
     # ================== 自动撤回 ==================
     
