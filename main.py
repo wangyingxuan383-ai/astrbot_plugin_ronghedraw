@@ -846,7 +846,12 @@ class Main(Star):
             if not is_wake:
                 return
         
-        text = event.message_str.strip()
+        # 安全获取消息文本
+        text = getattr(event, 'message_str', '')
+        if not text:
+            text = str(event.message_obj.message) if hasattr(event, 'message_obj') else ''
+        
+        text = text.strip()
         if not text:
             return
         
