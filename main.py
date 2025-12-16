@@ -36,7 +36,7 @@ from . import limit_manager
     "Antigravity",
     "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini 三种 API 模式",
     "1.0.0",
-    "https://github.com/Antigravity/astrbot_plugin_ronghedraw",
+    "https://github.com/wangyingxuan383-ai/astrbot_plugin_ronghedraw",
 )
 class Main(Star):
     """RongheDraw 多模式绘图插件"""
@@ -95,6 +95,10 @@ class Main(Star):
         if missing:
             logger.warning(f"[RongheDraw] ⚠️ 缺少依赖: {', '.join(missing)}")
             logger.warning(f"[RongheDraw] 请运行: pip install {' '.join(missing)}")
+    
+    async def initialize(self):
+        """插件激活时调用，用于初始化资源"""
+        logger.info('[RongheDraw] 插件已激活')
     
     def _load_prompt_map(self):
         """加载预设提示词"""
@@ -655,25 +659,25 @@ class Main(Star):
     
     # ================== 文生图命令 ==================
     
-    @filter.command("f文", alias={"f文生图"}, prefix_optional=True)
+    @filter.command("f文", alias={"f文生图"})
     async def cmd_flow_text2img(self, event: AstrMessageEvent):
         """Flow模式文生图"""
         async for result in self._handle_text2img(event, "flow"):
             yield result
     
-    @filter.command("o文", alias={"o文生图"}, prefix_optional=True)
+    @filter.command("o文", alias={"o文生图"})
     async def cmd_generic_text2img(self, event: AstrMessageEvent):
         """Generic模式文生图"""
         async for result in self._handle_text2img(event, "generic"):
             yield result
     
-    @filter.command("g文", alias={"g文生图"}, prefix_optional=True)
+    @filter.command("g文", alias={"g文生图"})
     async def cmd_gemini_text2img(self, event: AstrMessageEvent):
         """Gemini模式文生图"""
         async for result in self._handle_text2img(event, "gemini"):
             yield result
     
-    @filter.command("文生图", alias={"文"}, prefix_optional=True)
+    @filter.command("文生图", alias={"文"})
     async def cmd_default_text2img(self, event: AstrMessageEvent):
         """默认模式文生图"""
         user_id = event.get_sender_id()
@@ -743,25 +747,25 @@ class Main(Star):
     
     # ================== 图生图命令 ==================
     
-    @filter.command("f图", alias={"f图生图"}, prefix_optional=True)
+    @filter.command("f图", alias={"f图生图"})
     async def cmd_flow_img2img(self, event: AstrMessageEvent):
         """Flow模式图生图"""
         async for result in self._handle_img2img(event, "flow"):
             yield result
     
-    @filter.command("o图", alias={"o图生图"}, prefix_optional=True)
+    @filter.command("o图", alias={"o图生图"})
     async def cmd_generic_img2img(self, event: AstrMessageEvent):
         """Generic模式图生图"""
         async for result in self._handle_img2img(event, "generic"):
             yield result
     
-    @filter.command("g图", alias={"g图生图"}, prefix_optional=True)
+    @filter.command("g图", alias={"g图生图"})
     async def cmd_gemini_img2img(self, event: AstrMessageEvent):
         """Gemini模式图生图"""
         async for result in self._handle_img2img(event, "gemini"):
             yield result
     
-    @filter.command("图生图", alias={"图"}, prefix_optional=True)
+    @filter.command("图生图", alias={"图"})
     async def cmd_default_img2img(self, event: AstrMessageEvent):
         """默认模式图生图"""
         user_id = event.get_sender_id()
@@ -903,22 +907,22 @@ class Main(Star):
     # ================== 预设命令 ==================
 
     
-    @filter.command("f手办化", prefix_optional=True)
+    @filter.command("f手办化")
     async def cmd_flow_figurine(self, event: AstrMessageEvent):
         async for r in self._handle_preset(event, "flow", "手办化"):
             yield r
     
-    @filter.command("o手办化", prefix_optional=True)
+    @filter.command("o手办化")
     async def cmd_generic_figurine(self, event: AstrMessageEvent):
         async for r in self._handle_preset(event, "generic", "手办化"):
             yield r
     
-    @filter.command("g手办化", prefix_optional=True)
+    @filter.command("g手办化")
     async def cmd_gemini_figurine(self, event: AstrMessageEvent):
         async for r in self._handle_preset(event, "gemini", "手办化"):
             yield r
     
-    @filter.command("手办化", prefix_optional=True)
+    @filter.command("手办化")
     async def cmd_default_figurine(self, event: AstrMessageEvent):
         user_id = event.get_sender_id()
         group_id = event.get_group_id()
@@ -991,14 +995,14 @@ class Main(Star):
     
     # ================== 管理命令 ==================
     
-    @filter.command("查询次数", prefix_optional=True)
+    @filter.command("查询次数")
     async def cmd_query_limit(self, event: AstrMessageEvent):
         """查询剩余次数"""
         user_id = event.get_sender_id()
         remaining = limit_manager.get_user_remaining(user_id, self.config)
         yield event.plain_result(f"👤 用户: {user_id}\n📊 今日剩余: {remaining}")
     
-    @filter.command("f切换模型", prefix_optional=True)
+    @filter.command("f切换模型")
     async def cmd_switch_flow_model(self, event: AstrMessageEvent):
         """切换Flow模式模型"""
         model_list = self.config.get("flow_model_list", [])
@@ -1016,7 +1020,7 @@ class Main(Star):
         
         yield event.plain_result(msg)
     
-    @filter.command("f翻译开关", prefix_optional=True)
+    @filter.command("f翻译开关")
     async def cmd_toggle_translate(self, event: AstrMessageEvent):
         """切换翻译功能"""
         current = self.config.get("flow_enable_translate", False)
@@ -1024,7 +1028,7 @@ class Main(Star):
         status = "开启" if not current else "关闭"
         yield event.plain_result(f"🌐 翻译功能已{status}")
     
-    @filter.command("预设列表", prefix_optional=True)
+    @filter.command("预设列表")
     async def cmd_list_presets(self, event: AstrMessageEvent):
         """列出所有预设"""
         builtin = list(self.builtin_presets.keys())
@@ -1037,13 +1041,13 @@ class Main(Star):
         
         yield event.plain_result(msg)
     
-    @filter.command("生图帮助", prefix_optional=True)
+    @filter.command("生图帮助")
     async def cmd_help(self, event: AstrMessageEvent):
         """显示帮助"""
         help_text = self.config.get("help_text", "帮助未配置")
         yield event.plain_result(help_text)
     
-    @filter.command("生图菜单", prefix_optional=True)
+    @filter.command("生图菜单")
     async def cmd_menu(self, event: AstrMessageEvent):
         """显示菜单"""
         menu = """🎨 RongheDraw 绘图插件 v1.0.0
@@ -1083,7 +1087,7 @@ g = Gemini (仅白名单, 4K输出)
         all_presets = list(self.builtin_presets.keys()) + list(self.prompt_map.keys())
         return all_presets if all_presets else []
     
-    @filter.command("f随机", prefix_optional=True)
+    @filter.command("f随机")
     async def cmd_flow_random(self, event: AstrMessageEvent):
         """Flow模式随机预设"""
         all_presets = self._get_all_presets()
@@ -1094,7 +1098,7 @@ g = Gemini (仅白名单, 4K输出)
         async for r in self._handle_preset(event, "flow", preset):
             yield r
     
-    @filter.command("o随机", prefix_optional=True)
+    @filter.command("o随机")
     async def cmd_generic_random(self, event: AstrMessageEvent):
         """Generic模式随机预设"""
         all_presets = self._get_all_presets()
@@ -1105,7 +1109,7 @@ g = Gemini (仅白名单, 4K输出)
         async for r in self._handle_preset(event, "generic", preset):
             yield r
     
-    @filter.command("g随机", prefix_optional=True)
+    @filter.command("g随机")
     async def cmd_gemini_random(self, event: AstrMessageEvent):
         """Gemini模式随机预设"""
         all_presets = self._get_all_presets()
@@ -1116,7 +1120,7 @@ g = Gemini (仅白名单, 4K输出)
         async for r in self._handle_preset(event, "gemini", preset):
             yield r
     
-    @filter.command("随机", alias={"随机预设"}, prefix_optional=True)
+    @filter.command("随机", alias={"随机预设"})
     async def cmd_default_random(self, event: AstrMessageEvent):
         """默认模式随机预设"""
         all_presets = self._get_all_presets()
