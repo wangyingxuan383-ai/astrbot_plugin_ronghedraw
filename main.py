@@ -223,6 +223,19 @@ class Main(Star):
         b64 = base64.b64encode(data).decode()
         return f"data:{mime};base64,{b64}"
     
+
+    def _create_image_from_bytes(self, data: bytes) -> Image:
+        """从bytes创建Image组件（兼容不同AstrBot版本）"""
+        try:
+            # 优先使用fromBytes（如果存在）
+            if hasattr(Image, 'fromBytes'):
+                return Image.fromBytes(data)
+        except Exception:
+            pass
+        # 回退到fromBase64
+        b64 = base64.b64encode(data).decode()
+        return Image.fromBase64(b64)
+    
     def _compress_image(self, data: bytes, max_size: int = 1024, quality: int = 85) -> bytes:
         """压缩图片，限制最大尺寸"""
         if PILImage is None:
@@ -698,7 +711,7 @@ class Main(Star):
             return
         
         # 提取提示词并清理@用户信息
-        raw = event.message_str.strip()
+        raw = event.get_message_str().strip()
         prompt = re.sub(r'^[fog]?文(生图)?\s*', '', raw, flags=re.IGNORECASE).strip()
         prompt = self._clean_prompt(prompt, event)
         
@@ -731,7 +744,7 @@ class Main(Star):
             
             if success:
                 yield event.chain_result([
-                    Image.fromBytes(result),
+                    self._create_image_from_bytes(result),
                     Plain(f"✅ [{mode_name}] 生成成功 ({elapsed:.1f}s) | {limit_msg}")
                 ])
             else:
@@ -786,7 +799,7 @@ class Main(Star):
             return
         
         # 提取提示词并清理@用户信息
-        raw = event.message_str.strip()
+        raw = event.get_message_str().strip()
         prompt = re.sub(r'^[fog]?图(生图)?\s*', '', raw, flags=re.IGNORECASE).strip()
         prompt = self._clean_prompt(prompt, event)
         
@@ -824,7 +837,7 @@ class Main(Star):
             
             if success:
                 yield event.chain_result([
-                    Image.fromBytes(result),
+                    self._create_image_from_bytes(result),
                     Plain(f"✅ [{mode_name}] 生成成功 ({elapsed:.1f}s) | {limit_msg}")
                 ])
             else:
@@ -979,7 +992,7 @@ class Main(Star):
             
             if success:
                 yield event.chain_result([
-                    Image.fromBytes(result),
+                    self._create_image_from_bytes(result),
                     Plain(f"✅ [{mode_name}] {preset_name}成功 ({elapsed:.1f}s) | {limit_msg}")
                 ])
             else:
@@ -1186,7 +1199,7 @@ g = Gemini (仅白名单, 4K输出)
         
         if success:
             yield event.chain_result([
-                Image.fromBytes(result),
+                self._create_image_from_bytes(result),
                 Plain(f"✅ [LLM-{mode_name}] 生成成功 ({elapsed:.1f}s) | {limit_msg}")
             ])
         else:
@@ -1210,7 +1223,7 @@ g = Gemini (仅白名单, 4K输出)
         avatar = await self._get_avatar(qq_number)
         if avatar:
             yield event.chain_result([
-                Image.fromBytes(avatar),
+                self._create_image_from_bytes(avatar),
                 Plain(f"✅ 已获取用户 {qq_number} 的头像")
             ])
         else:
