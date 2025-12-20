@@ -39,8 +39,15 @@ def _init_db():
     
     conn = sqlite3.connect(db_file)
     c = conn.cursor()
+    
+    # 个人次数统计表
     c.execute('''CREATE TABLE IF NOT EXISTS usage_stats
                  (user_id TEXT PRIMARY KEY, count INTEGER, last_date TEXT)''')
+    
+    # 群级LLM统计表
+    c.execute('''CREATE TABLE IF NOT EXISTS group_llm_usage
+                 (group_id TEXT PRIMARY KEY, count INTEGER, last_date TEXT)''')
+    
     conn.commit()
     conn.close()
     _db_initialized = True
@@ -181,3 +188,81 @@ def get_user_remaining(user_id: str, config: dict) -> str:
     
     remaining = max(0, user_limit - row[0])
     return f"{remaining}/{user_limit}"
+
+
+def check_and_consume_group(group_id: str, config: dict) -> tuple:
+    """
+    群级次数检查（仅LLM工具使用）
+    
+    返回: (是否允许, 提示信息)
+    """
+    group_id = str(group_id).strip() if group_id else None
+    
+    # 私聊场景无群ID，返回错误
+    if not group_id:
+        return False, "LLM绘图功能仅在群聊中可用"
+    
+    # 检查群白名单
+    llm_whitelist = _parse_list(config.get("llm_group_whitelist", []))
+    if group_id in llm_whitelist:
+        return True, "剩余: ∞"
+    
+    # 群统计
+    limit = config.get("llm_group_daily_limit", 10)
+    today_str = datetime.date.today().isoformat()
+    
+    conn = _get_connection()
+    c = conn.cursor()
+    
+    c.execute("SELECT count, last_date FROM group_llm_usage WHERE group_id=?", (group_id,))
+    row = c.fetchone()
+    
+    current_count = 0
+    if row:
+        if row[1] != today_str:
+            c.execute("UPDATE group_llm_usage SET count=0, last_date=? WHERE group_id=?", (today_str, group_id))
+        else:
+            current_count = row[0]
+    else:
+        c.execute("INSERT INTO group_llm_usage VALUES (?, 0, ?)", (group_id, today_str))
+    
+    if current_count >= limit:
+        conn.commit()
+        conn.close()
+        return False, f"本群LLM绘图额度已用尽 ({current_count}/{limit})，请明日再来"
+    
+    c.execute("UPDATE group_llm_usage SET count = count + 1 WHERE group_id=?", (group_id,))
+    conn.commit()
+    conn.close()
+    
+    remaining = limit - (current_count + 1)
+    return True, f"本群剩余: {remaining}/{limit}"
+
+
+def get_group_remaining(group_id: str, config: dict) -> str:
+    """查询群LLM绘图剩余次数"""
+    group_id = str(group_id).strip() if group_id else None
+    
+    if not group_id:
+        return "N/A (仅群聊)"
+    
+    # 检查群白名单
+    llm_whitelist = _parse_list(config.get("llm_group_whitelist", []))
+    if group_id in llm_whitelist:
+        return "∞ (白名单)"
+    
+    limit = config.get("llm_group_daily_limit", 10)
+    today_str = datetime.date.today().isoformat()
+    
+    conn = _get_connection()
+    c = conn.cursor()
+    
+    c.execute("SELECT count, last_date FROM group_llm_usage WHERE group_id=?", (group_id,))
+    row = c.fetchone()
+    conn.close()
+    
+    if not row or row[1] != today_str:
+        return f"{limit}/{limit}"
+    
+    remaining = max(0, limit - row[0])
+    return f"{remaining}/{limit}"

@@ -103,7 +103,7 @@
         ]
     },
     "default_mode": {
-        "description": "【通用】默认API模式",
+        "description": "【通用】白名单默认API模式",
         "type": "string",
         "hint": "白名单用户使用无前缀命令时的默认模式。",
         "default": "generic",
@@ -112,6 +112,35 @@
             "generic",
             "gemini"
         ]
+    },
+    "normal_user_default_mode": {
+        "description": "【通用】普通用户默认模式",
+        "type": "string",
+        "hint": "普通用户使用无前缀命令时的默认模式。",
+        "default": "flow",
+        "options": [
+            "flow",
+            "generic",
+            "gemini"
+        ]
+    },
+    "enable_flow_mode": {
+        "description": "【模式开关】启用Flow模式",
+        "type": "bool",
+        "hint": "关闭后，所有f开头的指令和Flow模式将不可用。",
+        "default": true
+    },
+    "enable_generic_mode": {
+        "description": "【模式开关】启用Generic模式",
+        "type": "bool",
+        "hint": "关闭后，所有o开头的指令和Generic模式将不可用。",
+        "default": true
+    },
+    "enable_gemini_mode": {
+        "description": "【模式开关】启用Gemini模式",
+        "type": "bool",
+        "hint": "关闭后，所有g开头的指令和Gemini模式将不可用。",
+        "default": true
     },
     "daily_limit": {
         "description": "【次数】每日限制次数",
@@ -161,6 +190,27 @@
             "generic",
             "gemini"
         ]
+    },
+    "llm_tool_use_group_limit": {
+        "description": "【LLM】使用群级次数统计",
+        "type": "bool",
+        "hint": "开启后，LLM绘图工具按群统计次数。关闭则按个人统计。",
+        "default": true
+    },
+    "llm_group_daily_limit": {
+        "description": "【LLM】群每日限额",
+        "type": "int",
+        "hint": "非白名单群每日LLM绘图次数上限（仅群统计模式有效）。",
+        "default": 10
+    },
+    "llm_group_whitelist": {
+        "description": "【LLM】群白名单",
+        "type": "list",
+        "hint": "白名单群LLM绘图不限次数（仅群统计模式有效）。",
+        "items": {
+            "type": "string"
+        },
+        "default": []
     },
     "enable_auto_recall": {
         "description": "【撤回】启用自动撤回",

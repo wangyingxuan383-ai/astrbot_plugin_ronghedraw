@@ -667,8 +667,43 @@ class Main(Star):
         if limit_manager.is_group_whitelisted(group_id, self.config):
             return self.config.get("default_mode", "generic")
         
-        # 普通用户默认用flow
-        return "flow"
+        # 普通用户使用配置的默认模式
+        return self.config.get("normal_user_default_mode", "flow")
+    
+    def _check_mode_enabled(self, mode: str) -> Tuple[bool, str]:
+        """
+        检查模式是否启用
+        
+        返回: (是否启用, 错误提示)
+        """
+        mode_switch = {
+            "flow": "enable_flow_mode",
+            "generic": "enable_generic_mode",
+            "gemini": "enable_gemini_mode"
+        }
+        
+        if not self.config.get(mode_switch[mode], True):
+            # 找出当前可用的模式
+            available = []
+            for m, switch in mode_switch.items():
+                if self.config.get(switch, True):
+                    available.append(m)
+            
+            if not available:
+                return False, "❌ 所有绘图模式均已关闭"
+            
+            mode_names = {
+                "flow": "Flow (f)",
+                "generic": "Generic (o)",
+                "gemini": "Gemini (g)"
+            }
+            
+            current_name = mode_names[mode]
+            available_names = [mode_names[m] for m in available]
+            
+            return False, f"❌ {current_name} 模式当前不可用\n💡 可用模式: {', '.join(available_names)}"
+        
+        return True, ""
     
     # ================== 文生图命令 ==================
     
@@ -708,6 +743,12 @@ class Main(Star):
         allowed, actual_mode, err_msg = limit_manager.check_permission(user_id, group_id, mode, self.config)
         if not allowed:
             yield event.plain_result(err_msg)
+            return
+        
+        # 模式启用检查
+        enabled, mode_err = self._check_mode_enabled(actual_mode)
+        if not enabled:
+            yield event.plain_result(mode_err)
             return
         
         # 提取提示词并清理@用户信息
@@ -796,6 +837,12 @@ class Main(Star):
         allowed, actual_mode, err_msg = limit_manager.check_permission(user_id, group_id, mode, self.config)
         if not allowed:
             yield event.plain_result(err_msg)
+            return
+        
+        # 模式启用检查
+        enabled, mode_err = self._check_mode_enabled(actual_mode)
+        if not enabled:
+            yield event.plain_result(mode_err)
             return
         
         # 提取提示词并清理@用户信息
@@ -952,6 +999,12 @@ class Main(Star):
         allowed, actual_mode, err_msg = limit_manager.check_permission(user_id, group_id, mode, self.config)
         if not allowed:
             yield event.plain_result(err_msg)
+            return
+        
+        # 模式启用检查
+        enabled, mode_err = self._check_mode_enabled(actual_mode)
+        if not enabled:
+            yield event.plain_result(mode_err)
             return
         
         # 获取预设提示词
@@ -1150,12 +1203,18 @@ g = Gemini (仅白名单, 4K输出)
     # ================== LLM 工具 ==================
     
     @filter.llm_tool(name="generate_image")
-    async def llm_tool_generate_image(self, event: AstrMessageEvent, prompt: str):
+    async def llm_tool_generate_image(
+        self,
+        event: AstrMessageEvent,
+        prompt: str,
+        image_urls: Optional[List[str]] = None
+    ):
         '''
-        根据描述生成图片。当用户请求绘制、生成、创作图片时调用此工具。
+        生成图片。prompt为画面描述，可优化用户原话。image_urls为参考图URL列表（可选），不传则文生图，传入则图生图。URL需http(s)开头。每次调用消耗群额度。
         
         Args:
-            prompt (string): 图片描述，描述你想生成的图片内容
+            prompt (string): 画面描述
+            image_urls (array[string], optional): 参考图URL列表
         '''
         if not self.config.get("enable_llm_tool", False):
             yield event.plain_result("LLM 绘图工具未启用")
@@ -1177,24 +1236,63 @@ g = Gemini (仅白名单, 4K输出)
             yield event.plain_result(err_msg)
             return
         
-        # 次数检查
-        ok, limit_msg = limit_manager.check_and_consume(user_id, group_id, self.config)
+        # 模式启用检查
+        enabled, mode_err = self._check_mode_enabled(actual_mode)
+        if not enabled:
+            yield event.plain_result(mode_err)
+            return
+        
+        # 次数检查 - 使用群级统计或个人统计
+        if self.config.get("llm_tool_use_group_limit", True) and group_id:
+            ok, limit_msg = limit_manager.check_and_consume_group(group_id, self.config)
+        else:
+            ok, limit_msg = limit_manager.check_and_consume(user_id, group_id, self.config)
+        
         if not ok:
             yield event.plain_result(f"❌ {limit_msg}")
             return
         
         mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini"}[actual_mode]
         
-        # 获取消息中的图片（支持图生图）
-        images = await self.get_images(event)
+        # 处理图片URL（如果AI提供了）
+        images = []
+        invalid_urls = []
         
+        if image_urls:
+            for url in image_urls:
+                # URL格式检查
+                if not url.startswith(('http://', 'https://')):
+                    invalid_urls.append((url, "非HTTP(S)协议"))
+                    continue
+                
+                # 下载图片
+                img_data = await self._download_image(url)
+                if img_data:
+                    images.append(img_data)
+                else:
+                    invalid_urls.append((url, "下载失败"))
+        
+        # 清理提示词中的@用户信息
+        clean_prompt = self._clean_prompt(prompt, event)
+        
+        # 确定任务类型
         if images:
-            yield event.plain_result(f"🤖 [LLM-{mode_name}] 图生图: {prompt[:30]}...")
+            task_type = f"图生图 ({len(images)}张)"
         else:
-            yield event.plain_result(f"🤖 [LLM-{mode_name}] 文生图: {prompt[:30]}...")
+            task_type = "文生图"
+        
+        # 如果有无效URL，提示但继续
+        if invalid_urls:
+            error_list = "\n".join([f"  - {url[:50]}: {reason}" for url, reason in invalid_urls])
+            if images:
+                yield event.plain_result(f"⚠️ 部分URL无效已忽略:\n{error_list}\n继续使用{len(images)}张有效图片...")
+            else:
+                yield event.plain_result(f"⚠️ 所有URL无效:\n{error_list}\n已转为文生图模式")
+        
+        yield event.plain_result(f"🤖 [LLM-{mode_name}] {task_type}: {clean_prompt[:30]}...")
         
         start = time.time()
-        success, result = await self.generate(actual_mode, images, prompt)
+        success, result = await self.generate(actual_mode, images, clean_prompt)
         elapsed = time.time() - start
         
         if success:
@@ -1205,29 +1303,33 @@ g = Gemini (仅白名单, 4K输出)
         else:
             yield event.plain_result(f"❌ [LLM-{mode_name}] 生成失败 ({elapsed:.1f}s)\n原因: {result}")
     
+    
     @filter.llm_tool(name="get_avatar")
     async def llm_tool_get_avatar(self, event: AstrMessageEvent, qq_number: str):
         '''
-        通过QQ号获取用户头像图片。用于获取指定用户的头像进行绘图或展示。
+        获取QQ头像URL。返回的URL可传给generate_image。
         
         Args:
-            qq_number (string): QQ号码，纯数字字符串
+            qq_number (string): QQ号
         '''
-        # 获取头像是通用功能，不受绘图开关限制
-        
         qq_number = str(qq_number).strip()
         if not qq_number.isdigit():
             yield event.plain_result(f"❌ 无效的QQ号: {qq_number}")
             return
         
-        avatar = await self._get_avatar(qq_number)
-        if avatar:
-            yield event.chain_result([
-                self._create_image_from_bytes(avatar),
-                Plain(f"✅ 已获取用户 {qq_number} 的头像")
-            ])
-        else:
-            yield event.plain_result(f"❌ 获取头像失败: {qq_number}")
+        # 构造头像URL
+        avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={qq_number}&s=640"
+        
+        # 可选：验证URL有效性
+        if self.config.get("llm_tool_validate_avatar_url", True):
+            test_download = await self._download_image(avatar_url)
+            if not test_download:
+                yield event.plain_result(f"❌ 无法访问用户 {qq_number} 的头像")
+                return
+        
+        # 返回URL文本
+        yield event.plain_result(f"✅ 头像URL: {avatar_url}")
+    
     
     # ================== 自动撤回 ==================
     
