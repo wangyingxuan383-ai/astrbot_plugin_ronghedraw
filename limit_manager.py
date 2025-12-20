@@ -137,28 +137,29 @@ def check_and_consume(user_id: str, group_id: str, config: dict) -> tuple:
     
     today_str = datetime.date.today().isoformat()
     conn = _get_connection()
-    c = conn.cursor()
-    
-    c.execute("SELECT count, last_date FROM usage_stats WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-    
-    current_count = 0
-    if row:
-        if row[1] != today_str:
-            c.execute("UPDATE usage_stats SET count=0, last_date=? WHERE user_id=?", (today_str, user_id))
+    try:
+        c = conn.cursor()
+        
+        c.execute("SELECT count, last_date FROM usage_stats WHERE user_id=?", (user_id,))
+        row = c.fetchone()
+        
+        current_count = 0
+        if row:
+            if row[1] != today_str:
+                c.execute("UPDATE usage_stats SET count=0, last_date=? WHERE user_id=?", (today_str, user_id))
+            else:
+                current_count = row[0]
         else:
-            current_count = row[0]
-    else:
-        c.execute("INSERT INTO usage_stats (user_id, count, last_date) VALUES (?, 0, ?)", (user_id, today_str))
-    
-    if current_count >= user_limit:
+            c.execute("INSERT INTO usage_stats (user_id, count, last_date) VALUES (?, 0, ?)", (user_id, today_str))
+        
+        if current_count >= user_limit:
+            conn.commit()
+            return False, f"今日额度已用尽 ({current_count}/{user_limit})，请明日再来"
+        
+        c.execute("UPDATE usage_stats SET count = count + 1 WHERE user_id=?", (user_id,))
         conn.commit()
+    finally:
         conn.close()
-        return False, f"今日额度已用尽 ({current_count}/{user_limit})，请明日再来"
-    
-    c.execute("UPDATE usage_stats SET count = count + 1 WHERE user_id=?", (user_id,))
-    conn.commit()
-    conn.close()
     
     remaining = user_limit - (current_count + 1)
     return True, f"剩余: {remaining}/{user_limit}"
@@ -177,11 +178,12 @@ def get_user_remaining(user_id: str, config: dict) -> str:
     
     today_str = datetime.date.today().isoformat()
     conn = _get_connection()
-    c = conn.cursor()
-    
-    c.execute("SELECT count, last_date FROM usage_stats WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-    conn.close()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT count, last_date FROM usage_stats WHERE user_id=?", (user_id,))
+        row = c.fetchone()
+    finally:
+        conn.close()
     
     if not row or row[1] != today_str:
         return f"{user_limit}/{user_limit}"
@@ -212,28 +214,29 @@ def check_and_consume_group(group_id: str, config: dict) -> tuple:
     today_str = datetime.date.today().isoformat()
     
     conn = _get_connection()
-    c = conn.cursor()
-    
-    c.execute("SELECT count, last_date FROM group_llm_usage WHERE group_id=?", (group_id,))
-    row = c.fetchone()
-    
-    current_count = 0
-    if row:
-        if row[1] != today_str:
-            c.execute("UPDATE group_llm_usage SET count=0, last_date=? WHERE group_id=?", (today_str, group_id))
+    try:
+        c = conn.cursor()
+        
+        c.execute("SELECT count, last_date FROM group_llm_usage WHERE group_id=?", (group_id,))
+        row = c.fetchone()
+        
+        current_count = 0
+        if row:
+            if row[1] != today_str:
+                c.execute("UPDATE group_llm_usage SET count=0, last_date=? WHERE group_id=?", (today_str, group_id))
+            else:
+                current_count = row[0]
         else:
-            current_count = row[0]
-    else:
-        c.execute("INSERT INTO group_llm_usage VALUES (?, 0, ?)", (group_id, today_str))
-    
-    if current_count >= limit:
+            c.execute("INSERT INTO group_llm_usage VALUES (?, 0, ?)", (group_id, today_str))
+        
+        if current_count >= limit:
+            conn.commit()
+            return False, f"本群LLM绘图额度已用尽 ({current_count}/{limit})，请明日再来"
+        
+        c.execute("UPDATE group_llm_usage SET count = count + 1 WHERE group_id=?", (group_id,))
         conn.commit()
+    finally:
         conn.close()
-        return False, f"本群LLM绘图额度已用尽 ({current_count}/{limit})，请明日再来"
-    
-    c.execute("UPDATE group_llm_usage SET count = count + 1 WHERE group_id=?", (group_id,))
-    conn.commit()
-    conn.close()
     
     remaining = limit - (current_count + 1)
     return True, f"本群剩余: {remaining}/{limit}"
@@ -255,11 +258,12 @@ def get_group_remaining(group_id: str, config: dict) -> str:
     today_str = datetime.date.today().isoformat()
     
     conn = _get_connection()
-    c = conn.cursor()
-    
-    c.execute("SELECT count, last_date FROM group_llm_usage WHERE group_id=?", (group_id,))
-    row = c.fetchone()
-    conn.close()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT count, last_date FROM group_llm_usage WHERE group_id=?", (group_id,))
+        row = c.fetchone()
+    finally:
+        conn.close()
     
     if not row or row[1] != today_str:
         return f"{limit}/{limit}"

@@ -79,6 +79,12 @@ class Main(Star):
             "第三视角": "Generate third-person perspective scene",
         }
         
+        # HTTP session (在initialize中创建)
+        self._http_session = None
+        
+        # 跟踪pending的asyncio任务
+        self.pending_tasks = set()
+        
         # 检查依赖
         self._check_dependencies()
     
@@ -93,12 +99,27 @@ class Main(Star):
             missing.append("aiohttp")
         
         if missing:
-            logger.warning(f"[RongheDraw] ⚠️ 缺少依赖: {', '.join(missing)}")
-            logger.warning(f"[RongheDraw] 请运行: pip install {' '.join(missing)}")
+            logger.warning(f"[RongheDraw] WARNING: Missing dependencies: {', '.join(missing)}")
+            logger.warning(f"[RongheDraw] Run: pip install {' '.join(missing)}")
+    
+    def _validate_config(self):
+        """验证必需配置"""
+        has_api = (self.config.get("flow_api_url") or 
+                   self.config.get("generic_api_url") or 
+                   self.config.get("gemini_api_url"))
+        if not has_api:
+            logger.warning("[RongheDraw] WARNING: No API URL configured, plugin functionality limited")
     
     async def initialize(self):
         """插件激活时调用，用于初始化资源"""
-        logger.info('[RongheDraw] 插件已激活')
+        # 创建HTTP session复用连接池
+        import aiohttp
+        self._http_session = aiohttp.ClientSession()
+        
+        # 验证配置
+        self._validate_config()
+        
+        logger.info('[RongheDraw] 插件已激活，资源已初始化')
     
     def _load_prompt_map(self):
         """加载预设提示词"""
@@ -122,10 +143,14 @@ class Main(Star):
         
         for i in range(3):
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url, proxy=proxy, timeout=timeout) as resp:
-                        resp.raise_for_status()
-                        return await resp.read()
+                # 使用复用的session
+                if not self._http_session or self._http_session.closed:
+                    import aiohttp
+                    self._http_session = aiohttp.ClientSession()
+                
+                async with self._http_session.get(url, proxy=proxy, timeout=timeout) as resp:
+                    resp.raise_for_status()
+                    return await resp.read()
             except Exception as e:
                 if i < 2:
                     await asyncio.sleep(1)
@@ -1210,7 +1235,7 @@ g = Gemini (仅白名单, 4K输出)
         image_urls: Optional[List[str]] = None
     ):
         '''
-        生成图片。prompt为画面描述，可优化用户原话。image_urls为参考图URL列表（可选），不传则文生图，传入则图生图。URL需http(s)开头。每次调用消耗群额度。
+        生成图片。prompt为画面描述，可优化用户原话。image_urls为参考图URL列表（可选），不传则文生图，传入则图生图。URL需http(s)开头。调用成功后图片会自动发送给用户，你可以添加评论。每次调用消耗额度。
         
         Args:
             prompt (string): 画面描述
@@ -1218,6 +1243,15 @@ g = Gemini (仅白名单, 4K输出)
         '''
         if not self.config.get("enable_llm_tool", False):
             yield event.plain_result("LLM 绘图工具未启用")
+            return
+        
+        # 输入验证
+        if len(prompt) > 1000:
+            yield event.plain_result("提示词过长（最大1000字符）")
+            return
+        
+        if image_urls and len(image_urls) > 10:
+            yield event.plain_result("图片数量过多（最大10张）")
             return
         
         user_id = event.get_sender_id()
@@ -1242,66 +1276,48 @@ g = Gemini (仅白名单, 4K输出)
             yield event.plain_result(mode_err)
             return
         
-        # 次数检查 - 使用群级统计或个人统计
-        if self.config.get("llm_tool_use_group_limit", True) and group_id:
-            ok, limit_msg = limit_manager.check_and_consume_group(group_id, self.config)
-        else:
+        # 次数检查 - 修复私聊bug
+        if self.config.get("llm_tool_use_group_limit", True):
+            if group_id:  # 群聊使用群统计
+                ok, limit_msg = limit_manager.check_and_consume_group(group_id, self.config)
+            else:  # 私聊回退到个人统计
+                ok, limit_msg = limit_manager.check_and_consume(user_id, None, self.config)
+        else:  # 配置关闭群统计，全部使用个人统计
             ok, limit_msg = limit_manager.check_and_consume(user_id, group_id, self.config)
         
         if not ok:
             yield event.plain_result(f"❌ {limit_msg}")
             return
         
-        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini"}[actual_mode]
-        
         # 处理图片URL（如果AI提供了）
         images = []
-        invalid_urls = []
         
         if image_urls:
             for url in image_urls:
                 # URL格式检查
                 if not url.startswith(('http://', 'https://')):
-                    invalid_urls.append((url, "非HTTP(S)协议"))
-                    continue
+                    continue  # 静默跳过无效URL
                 
                 # 下载图片
                 img_data = await self._download_image(url)
                 if img_data:
                     images.append(img_data)
-                else:
-                    invalid_urls.append((url, "下载失败"))
         
         # 清理提示词中的@用户信息
         clean_prompt = self._clean_prompt(prompt, event)
         
-        # 确定任务类型
-        if images:
-            task_type = f"图生图 ({len(images)}张)"
-        else:
-            task_type = "文生图"
-        
-        # 如果有无效URL，提示但继续
-        if invalid_urls:
-            error_list = "\n".join([f"  - {url[:50]}: {reason}" for url, reason in invalid_urls])
-            if images:
-                yield event.plain_result(f"⚠️ 部分URL无效已忽略:\n{error_list}\n继续使用{len(images)}张有效图片...")
-            else:
-                yield event.plain_result(f"⚠️ 所有URL无效:\n{error_list}\n已转为文生图模式")
-        
-        yield event.plain_result(f"🤖 [LLM-{mode_name}] {task_type}: {clean_prompt[:30]}...")
+        # 静默处理无效URL
         
         start = time.time()
         success, result = await self.generate(actual_mode, images, clean_prompt)
         elapsed = time.time() - start
         
         if success:
-            yield event.chain_result([
-                self._create_image_from_bytes(result),
-                Plain(f"✅ [LLM-{mode_name}] 生成成功 ({elapsed:.1f}s) | {limit_msg}")
-            ])
+            # 成功：仅返回图片，无文本提示
+            yield event.chain_result([self._create_image_from_bytes(result)])
         else:
-            yield event.plain_result(f"❌ [LLM-{mode_name}] 生成失败 ({elapsed:.1f}s)\n原因: {result}")
+            # 失败：简洁错误信息
+            yield event.plain_result(f"生成失败: {result}")
     
     
     @filter.llm_tool(name="get_avatar")
@@ -1320,14 +1336,7 @@ g = Gemini (仅白名单, 4K输出)
         # 构造头像URL
         avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={qq_number}&s=640"
         
-        # 可选：验证URL有效性
-        if self.config.get("llm_tool_validate_avatar_url", True):
-            test_download = await self._download_image(avatar_url)
-            if not test_download:
-                yield event.plain_result(f"❌ 无法访问用户 {qq_number} 的头像")
-                return
-        
-        # 返回URL文本
+        # 返回URL文本（不验证，QQ头像服务稳定）
         yield event.plain_result(f"✅ 头像URL: {avatar_url}")
     
     
@@ -1376,7 +1385,11 @@ g = Gemini (仅白名单, 4K输出)
                             if self.config.get("debug_mode", False):
                                 logger.warning(f"[AutoRecall] 撤回失败: {e}")
                     
-                    asyncio.create_task(delayed_recall())
+                    task = asyncio.create_task(delayed_recall())
+                    self.pending_tasks.add(task)
+                    task.add_done_callback(self.pending_tasks.discard)
+                    self.pending_tasks.add(task)
+                    task.add_done_callback(self.pending_tasks.discard)
         except Exception as e:
             if self.config.get("debug_mode", False):
                 logger.warning(f"[AutoRecall] 钩子执行出错: {e}")
@@ -1385,5 +1398,18 @@ g = Gemini (仅白名单, 4K输出)
     
     async def terminate(self):
         """插件卸载"""
-        logger.info("[RongheDraw] 插件已卸载")
+        # 取消所有pending的任务
+        for task in list(self.pending_tasks):
+            if not task.done():
+                task.cancel()
+        
+        # 等待任务完成（包括被取消的）
+        if self.pending_tasks:
+            await asyncio.gather(*self.pending_tasks, return_exceptions=True)
+        
+        # 关闭HTTP session
+        if self._http_session and not self._http_session.closed:
+            await self._http_session.close()
+        
+        logger.info("[RongheDraw] 插件已卸载，资源已清理")
 
