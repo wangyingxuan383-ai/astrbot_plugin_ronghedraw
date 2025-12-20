@@ -1388,8 +1388,6 @@ g = Gemini (仅白名单, 4K输出)
                     task = asyncio.create_task(delayed_recall())
                     self.pending_tasks.add(task)
                     task.add_done_callback(self.pending_tasks.discard)
-                    self.pending_tasks.add(task)
-                    task.add_done_callback(self.pending_tasks.discard)
         except Exception as e:
             if self.config.get("debug_mode", False):
                 logger.warning(f"[AutoRecall] 钩子执行出错: {e}")
