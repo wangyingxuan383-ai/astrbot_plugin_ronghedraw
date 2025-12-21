@@ -181,9 +181,9 @@
         "default": false
     },
     "llm_default_mode": {
-        "description": "【LLM】白名单用户默认模式",
+        "description": "【LLM】默认模式",
         "type": "string",
-        "hint": "白名单用户/群聊调用LLM工具时使用的模式。普通用户固定使用flow模式。",
+        "hint": "LLM绘图工具使用的默认模式。所有用户统一使用此配置。",
         "default": "generic",
         "options": [
             "flow",

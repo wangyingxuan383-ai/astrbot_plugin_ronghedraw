@@ -1257,33 +1257,20 @@ g = Gemini (仅白名单, 4K输出)
         user_id = event.get_sender_id()
         group_id = event.get_group_id()
         
-        # 确定使用的模式
-        if limit_manager.is_user_whitelisted(user_id, self.config) or \
-           limit_manager.is_group_whitelisted(group_id, self.config):
-            mode = self.config.get("llm_default_mode", "generic")
-        else:
-            mode = "flow"
-        
-        # 权限检查
-        allowed, actual_mode, err_msg = limit_manager.check_permission(user_id, group_id, mode, self.config)
-        if not allowed:
-            yield event.plain_result(err_msg)
-            return
+        # 统一使用llm_default_mode（不区分白名单/普通用户）
+        mode = self.config.get("llm_default_mode", "generic")
         
         # 模式启用检查
-        enabled, mode_err = self._check_mode_enabled(actual_mode)
+        enabled, mode_err = self._check_mode_enabled(mode)
         if not enabled:
             yield event.plain_result(mode_err)
             return
         
-        # 次数检查 - 修复私聊bug
-        if self.config.get("llm_tool_use_group_limit", True):
-            if group_id:  # 群聊使用群统计
-                ok, limit_msg = limit_manager.check_and_consume_group(group_id, self.config)
-            else:  # 私聊回退到个人统计
-                ok, limit_msg = limit_manager.check_and_consume(user_id, None, self.config)
-        else:  # 配置关闭群统计，全部使用个人统计
-            ok, limit_msg = limit_manager.check_and_consume(user_id, group_id, self.config)
+        # 群次数检查（LLM工具统一使用群统计）
+        if group_id:  # 群聊使用群统计
+            ok, limit_msg = limit_manager.check_and_consume_group(group_id, self.config)
+        else:  # 私聊回退到个人统计
+            ok, limit_msg = limit_manager.check_and_consume(user_id, None, self.config)
         
         if not ok:
             yield event.plain_result(f"❌ {limit_msg}")
@@ -1310,7 +1297,7 @@ g = Gemini (仅白名单, 4K输出)
         
         
         start = time.time()
-        success, result = await self.generate(actual_mode, images, clean_prompt)
+        success, result = await self.generate(mode, images, clean_prompt)
         elapsed = time.time() - start
         
         if success:
