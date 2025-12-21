@@ -1308,16 +1308,19 @@ g = Gemini (仅白名单, 4K输出)
         
         # 静默处理无效URL
         
+        
         start = time.time()
         success, result = await self.generate(actual_mode, images, clean_prompt)
         elapsed = time.time() - start
         
         if success:
-            # 成功：仅返回图片，无文本提示
+            # 成功：发送图片给用户，同时返回成功信息给AI
             yield event.chain_result([self._create_image_from_bytes(result)])
+            return f"图片已生成并发送（耗时{elapsed:.1f}s）"
         else:
-            # 失败：简洁错误信息
-            yield event.plain_result(f"生成失败: {result}")
+            # 失败：返回错误信息给AI，让AI告知用户
+            return f"生成失败: {result}"
+    
     
     
     @filter.llm_tool(name="get_avatar")
