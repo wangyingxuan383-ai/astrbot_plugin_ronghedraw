@@ -1235,11 +1235,11 @@ g = Gemini (仅白名单, 4K输出)
         image_urls: Optional[List[str]] = None
     ):
         '''
-        生成图片。prompt为画面描述，可优化用户原话。image_urls为参考图URL列表（可选），不传则文生图，传入则图生图。URL需http(s)开头。调用成功后图片会自动发送给用户，你可以添加评论。每次调用消耗额度。
+        生成图片。prompt为画面描述，可优化用户原话。image_urls为参考图URL列表（可选可多个），不传则文生图，传入则图生图。URL需http(s)开头。调用成功后图片会自动发送给用户，可以用自然语言评论。
         
         Args:
             prompt (string): 画面描述
-            image_urls (array[string], optional): 参考图URL列表
+            image_urls (array[string], optional): 参考图URL列表（支持多图）
         '''
         if not self.config.get("enable_llm_tool", False):
             yield event.plain_result("LLM 绘图工具未启用")
