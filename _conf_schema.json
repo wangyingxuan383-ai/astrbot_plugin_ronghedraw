@@ -206,7 +206,7 @@
     "llm_group_whitelist": {
         "description": "【LLM】群白名单",
         "type": "list",
-        "hint": "【已废弃】请使用"群聊白名单"配置项。为保持向后兼容，此配置仍有效。",
+        "hint": "已废弃-请使用群聊白名单。为向后兼容保留此配置。",
         "items": {
             "type": "string"
         },
