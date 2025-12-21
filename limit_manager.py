@@ -113,11 +113,19 @@ def check_permission(user_id: str, group_id: str, requested_mode: str, config: d
     if is_group_whitelisted(group_id, config):
         return True, requested_mode, None
     
-    # 普通用户 - 只能使用 flow 模式
-    if requested_mode != "flow":
-        return False, "flow", "❌ 此命令需要白名单权限\n💡 普通用户请使用 #f文 或 #f图 命令"
+    # 普通用户 - 允许 flow 和配置的默认模式
+    normal_default = config.get("normal_user_default_mode", "flow")
+    allowed_modes = ["flow"] if normal_default == "flow" else ["flow", normal_default]
     
-    return True, "flow", None
+    if requested_mode not in allowed_modes:
+        # 生成提示信息
+        mode_hints = ["#f*"]
+        if normal_default != "flow":
+            mode_hints.append(f"#{normal_default[0]}*")
+        hint = f"普通用户可用: {', '.join(mode_hints)}"
+        return False, "flow", f"❌ 此命令需要白名单权限\n💡 {hint}"
+    
+    return True, requested_mode, None
 
 
 def check_and_consume(user_id: str, group_id: str, config: dict) -> tuple:
@@ -204,9 +212,10 @@ def check_and_consume_group(group_id: str, config: dict) -> tuple:
     if not group_id:
         return False, "LLM绘图功能仅在群聊中可用"
     
-    # 检查群白名单
+    # 检查群白名单（统一使用group_whitelist，保留llm_group_whitelist向后兼容）
+    general_whitelist = _parse_list(config.get("group_whitelist", []))
     llm_whitelist = _parse_list(config.get("llm_group_whitelist", []))
-    if group_id in llm_whitelist:
+    if group_id in general_whitelist or group_id in llm_whitelist:
         return True, "剩余: ∞"
     
     # 群统计

@@ -168,7 +168,7 @@
     "group_whitelist": {
         "description": "【权限】群聊白名单",
         "type": "list",
-        "hint": "白名单群聊可使用所有模式，但受次数限制。",
+        "hint": "白名单群聊可使用所有模式，但受次数限制。LLM绘图工具也使用此白名单。",
         "items": {
             "type": "string"
         },
@@ -206,7 +206,7 @@
     "llm_group_whitelist": {
         "description": "【LLM】群白名单",
         "type": "list",
-        "hint": "白名单群LLM绘图不限次数（仅群统计模式有效）。",
+        "hint": "【已废弃】请使用"群聊白名单"配置项。为保持向后兼容，此配置仍有效。",
         "items": {
             "type": "string"
         },
