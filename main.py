@@ -1314,13 +1314,11 @@ g = Gemini (仅白名单, 4K输出)
         elapsed = time.time() - start
         
         if success:
-            # 成功：发送图片给用户
+            # 成功：仅发送图片给用户，不发送状态消息
             yield event.chain_result([self._create_image_from_bytes(result)])
-            # 返回状态信息给AI（使用plain_result会被框架识别为返回值）
-            yield event.plain_result(f"[OK] 图片已生成并发送（{elapsed:.1f}s）")
         else:
-            # 失败：返回错误信息给AI
-            yield event.plain_result(f"[ERROR] 生成失败: {result}")
+            # 失败：发送简短错误信息
+            yield event.plain_result("生成失败")
     
     
     
