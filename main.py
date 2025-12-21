@@ -1321,20 +1321,20 @@ g = Gemini (仅白名单, 4K输出)
     
     
     @filter.llm_tool(name="get_avatar")
-    async def llm_tool_get_avatar(self, event: AstrMessageEvent, qq_number: str):
+    async def llm_tool_get_avatar(self, event: AstrMessageEvent, user_id: str):
         '''
         获取QQ头像URL。返回的URL可传给generate_image。
         
         Args:
-            qq_number (string): QQ号
+            user_id (string): QQ号
         '''
-        qq_number = str(qq_number).strip()
-        if not qq_number.isdigit():
-            yield event.plain_result(f"❌ 无效的QQ号: {qq_number}")
+        user_id = str(user_id).strip()
+        if not user_id.isdigit():
+            yield event.plain_result(f"❌ 无效的QQ号: {user_id}")
             return
         
         # 构造头像URL
-        avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={qq_number}&s=640"
+        avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
         
         # 返回URL文本（不验证，QQ头像服务稳定）
         yield event.plain_result(f"✅ 头像URL: {avatar_url}")
