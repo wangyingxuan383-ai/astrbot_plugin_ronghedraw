@@ -846,7 +846,7 @@ class Main(Star):
             yield result
     
     @filter.command("g图", alias={"g图生图"})
-    async def cmd_gemini_img2img(self, event: AstrMessageEvent, *args, **kwargs):
+    async def cmd_gemini_img2img(self, event: AstrMessageEvent, ctx=None):
         """Gemini模式图生图"""
         async for result in self._handle_img2img(event, "gemini"):
             yield result
