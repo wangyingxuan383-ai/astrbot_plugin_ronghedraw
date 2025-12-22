@@ -619,13 +619,20 @@ class Main(Star):
                     if "error" in data:
                         return False, f"错误: {data['error']}"
                     
-                    # 提取图片
+                    # 提取图片 - 获取最后一张（第一张可能是1K预览，最后一张才是高分辨率）
                     try:
+                        all_images = []
                         for candidate in data.get("candidates", []):
                             for part in candidate.get("content", {}).get("parts", []):
                                 if "inlineData" in part:
                                     b64 = part["inlineData"]["data"]
-                                    return True, base64.b64decode(b64)
+                                    all_images.append(base64.b64decode(b64))
+                        
+                        if all_images:
+                            # 返回最后一张图片（高分辨率版本）
+                            if self.config.get("debug_mode", False):
+                                logger.info(f"[Gemini] 收到 {len(all_images)} 张图片，返回最后一张")
+                            return True, all_images[-1]
                     except Exception:
                         pass
                     
