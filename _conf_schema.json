@@ -102,6 +102,12 @@
             "4K"
         ]
     },
+    "gemini_use_image_config": {
+        "description": "【Gemini模式】使用imageConfig参数",
+        "type": "bool",
+        "hint": "启用后使用imageConfig设置分辨率（推荐）。关闭则使用aspectRatio方式（旧版官方）。",
+        "default": true
+    },
     "default_mode": {
         "description": "【通用】白名单默认API模式",
         "type": "string",
