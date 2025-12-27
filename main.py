@@ -662,6 +662,8 @@ class Main(Star):
                 success, result = await self._call_generic_api(images, prompt)
             
             if success:
+                if self.config.get("debug_mode", False):
+                    logger.info(f"[{mode}] 生成成功 (第{attempt + 1}次尝试)")
                 return True, result
             
             last_error = result
