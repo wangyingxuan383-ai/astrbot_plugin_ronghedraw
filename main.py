@@ -570,11 +570,21 @@ class Main(Star):
                                            images: List[bytes], prompt: str,
                                            resolution: str, aspect_ratio: str) -> Tuple[bool, Any]:
         """Generic模式 - Gemini原生格式调用"""
-        # 构建URL（Gemini格式需要特定的endpoint）
+        # 构建URL - 需要清理OpenAI格式的路径，重构为Gemini格式
+        # 例如: https://api.bltcy.ai/v1/chat/completions -> https://api.bltcy.ai/v1beta/models/{model}:generateContent
         base = api_url.rstrip("/")
-        if "/v1beta" not in base and "/v1" not in base:
-            base += "/v1beta"
-        final_url = f"{base}/models/{model}:generateContent"
+        
+        # 移除OpenAI格式的路径后缀
+        for suffix in ["/chat/completions", "/completions", "/images/generations"]:
+            if base.endswith(suffix):
+                base = base[:-len(suffix)]
+        
+        # 移除末尾的/v1，改用/v1beta
+        if base.endswith("/v1"):
+            base = base[:-3]
+        
+        base = base.rstrip("/")
+        final_url = f"{base}/v1beta/models/{model}:generateContent"
         
         # 构建请求内容
         if images:
