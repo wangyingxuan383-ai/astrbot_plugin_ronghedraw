@@ -457,17 +457,28 @@ class Main(Star):
             return False, f"请求异常: {e}"
     
     async def _call_generic_api(self, images: List[bytes], prompt: str) -> Tuple[bool, Any]:
-        """调用Generic API (OpenAI通用格式，非流式，支持Gemini模型)"""
+        """调用Generic API (支持OpenAI格式和Gemini原生格式)"""
         api_url = self.config.get("generic_api_url", "")
         api_key = await self._get_api_key("generic")
         model = self.config.get("generic_default_model", "nano-banana")
+        api_format = self.config.get("generic_api_format", "openai")
         resolution = self.config.get("generic_resolution", "1K")
         aspect_ratio = self.config.get("generic_aspect_ratio", "自动")
         
         if not api_url or not api_key:
             return False, "Generic API 未配置"
         
-        # 构建消息（不压缩图片）
+        # 根据API格式选择不同的调用方式
+        if api_format == "gemini":
+            return await self._call_generic_gemini_format(api_url, api_key, model, images, prompt, resolution, aspect_ratio)
+        else:
+            return await self._call_generic_openai_format(api_url, api_key, model, images, prompt, resolution, aspect_ratio)
+    
+    async def _call_generic_openai_format(self, api_url: str, api_key: str, model: str, 
+                                          images: List[bytes], prompt: str, 
+                                          resolution: str, aspect_ratio: str) -> Tuple[bool, Any]:
+        """Generic模式 - OpenAI格式调用"""
+        # 构建消息
         if images:
             final_prompt = f"Re-imagine the attached image: {prompt}. Draw it directly."
             content = [{"type": "text", "text": final_prompt}]
@@ -481,21 +492,17 @@ class Main(Star):
             final_prompt = f"Generate a high quality image: {prompt}"
             messages = [{"role": "user", "content": final_prompt}]
         
-        # 构建generationConfig - 关键！支持Gemini模型图片生成
+        # 构建generationConfig
         image_config = {"imageSize": resolution}
-        # 文生图时可以指定宽高比，"自动"则不传让模型自动决定
         if not images and aspect_ratio and aspect_ratio != "自动":
             image_config["aspectRatio"] = aspect_ratio
         
-        # 非流式请求 - 添加modalities和generationConfig
         payload = {
             "model": model,
             "messages": messages,
             "stream": False,
-            "modalities": ["image", "text"],  # 关键参数！指定支持图片输出
-            "generationConfig": {
-                "imageConfig": image_config
-            }
+            "modalities": ["image", "text"],
+            "generationConfig": {"imageConfig": image_config}
         }
         
         headers = {
@@ -507,7 +514,7 @@ class Main(Star):
         proxy = self.config.get("proxy_url") if self.config.get("generic_use_proxy") else None
         
         if self.config.get("debug_mode", False):
-            logger.info(f"[Generic] 请求: model={model}, resolution={resolution}, aspectRatio={aspect_ratio}, images={len(images)}")
+            logger.info(f"[Generic-OpenAI] 请求: model={model}, resolution={resolution}, images={len(images)}")
         
         try:
             async with aiohttp.ClientSession() as session:
@@ -553,6 +560,100 @@ class Main(Star):
                             return True, img_data
                     
                     return False, f"响应中未找到图片: {full_content[:150]}"
+        
+        except asyncio.TimeoutError:
+            return False, "请求超时"
+        except Exception as e:
+            return False, f"请求异常: {e}"
+    
+    async def _call_generic_gemini_format(self, api_url: str, api_key: str, model: str,
+                                           images: List[bytes], prompt: str,
+                                           resolution: str, aspect_ratio: str) -> Tuple[bool, Any]:
+        """Generic模式 - Gemini原生格式调用"""
+        # 构建URL（Gemini格式需要特定的endpoint）
+        base = api_url.rstrip("/")
+        if "/v1beta" not in base and "/v1" not in base:
+            base += "/v1beta"
+        final_url = f"{base}/models/{model}:generateContent"
+        
+        # 构建请求内容
+        if images:
+            final_prompt = f"Re-imagine the attached image: {prompt}. Draw it directly. Output high quality {resolution} resolution image."
+        else:
+            final_prompt = f"Generate a high quality {resolution} resolution image: {prompt}"
+        
+        parts = [{"text": final_prompt}]
+        for img in images:
+            parts.append({
+                "inlineData": {
+                    "mimeType": "image/jpeg",
+                    "data": base64.b64encode(img).decode()
+                }
+            })
+        
+        # 构建生成配置
+        image_config = {"imageSize": resolution}
+        if not images and aspect_ratio and aspect_ratio != "自动":
+            image_config["aspectRatio"] = aspect_ratio
+        
+        generation_config = {
+            "maxOutputTokens": 8192,
+            "responseModalities": ["image", "text"],
+            "imageConfig": image_config
+        }
+        
+        payload = {
+            "contents": [{"parts": parts}],
+            "generationConfig": generation_config,
+            "safetySettings": [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+            ]
+        }
+        
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": api_key
+        }
+        
+        timeout = self.config.get("timeout", 120)
+        proxy = self.config.get("proxy_url") if self.config.get("generic_use_proxy") else None
+        
+        if self.config.get("debug_mode", False):
+            logger.info(f"[Generic-Gemini] 请求: model={model}, resolution={resolution}, images={len(images)}")
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(final_url, json=payload, headers=headers,
+                                        proxy=proxy, timeout=timeout) as resp:
+                    if resp.status != 200:
+                        text = await resp.text()
+                        return False, f"API错误 ({resp.status}): {text[:200]}"
+                    
+                    data = await resp.json()
+                    
+                    if "error" in data:
+                        return False, f"错误: {data['error']}"
+                    
+                    # 提取图片 - 获取最后一张
+                    try:
+                        all_images = []
+                        for candidate in data.get("candidates", []):
+                            for part in candidate.get("content", {}).get("parts", []):
+                                if "inlineData" in part:
+                                    b64 = part["inlineData"]["data"]
+                                    all_images.append(base64.b64decode(b64))
+                        
+                        if all_images:
+                            if self.config.get("debug_mode", False):
+                                logger.info(f"[Generic-Gemini] 收到 {len(all_images)} 张图片，返回最后一张")
+                            return True, all_images[-1]
+                    except Exception:
+                        pass
+                    
+                    return False, f"未找到图片: {str(data)[:200]}"
         
         except asyncio.TimeoutError:
             return False, "请求超时"

@@ -71,6 +71,16 @@
         "type": "string",
         "default": "nano-banana"
     },
+    "generic_api_format": {
+        "description": "【Generic模式】API格式",
+        "type": "string",
+        "hint": "选择API调用格式。使用Gemini模型时请选'gemini'格式，否则选'openai'格式。",
+        "default": "openai",
+        "options": [
+            "openai",
+            "gemini"
+        ]
+    },
     "generic_resolution": {
         "description": "【Generic模式】输出分辨率",
         "type": "string",
