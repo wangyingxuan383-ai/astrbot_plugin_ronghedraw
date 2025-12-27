@@ -3,7 +3,7 @@
 > AstrBot 绘图插件，支持 Flow/Generic/Gemini 三种 API 模式
 
 **作者**: Antigravity  
-**版本**: 1.1.7
+**版本**: 1.1.8
 
 
 ---

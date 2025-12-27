@@ -35,7 +35,7 @@ from . import limit_manager
     "astrbot_plugin_ronghedraw",
     "Antigravity",
     "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini 三种 API 模式",
-    "1.1.7",
+    "1.1.8",
     "https://github.com/wangyingxuan383-ai/astrbot_plugin_ronghedraw",
 )
 class Main(Star):
@@ -644,9 +644,12 @@ class Main(Star):
             return False, f"请求异常: {e}"
     
     async def generate(self, mode: str, images: List[bytes], prompt: str) -> Tuple[bool, Any]:
-        """统一生成入口（带重试机制）"""
+        """统一生成入口（带重试机制，指数退避）"""
         max_retries = self.config.get("max_retries", 3)
-        retry_delay = self.config.get("retry_delay", 2)
+        base_delay = self.config.get("retry_delay", 2)
+        
+        # 不可重试的错误关键词（配置错误、权限问题等）
+        non_retryable = ["未配置", "API Key", "配置错误", "权限", "Unauthorized", "Forbidden", "Invalid"]
         
         last_error = "未知错误"
         
@@ -662,16 +665,19 @@ class Main(Star):
                 return True, result
             
             last_error = result
+            error_str = str(result)
             
-            # 如果是明确的配置错误，不重试
-            if any(err in str(result) for err in ["未配置", "API Key", "配置错误"]):
+            # 如果是不可重试的错误，直接返回
+            if any(err in error_str for err in non_retryable):
                 return False, result
             
             # 还有重试机会
             if attempt < max_retries - 1:
+                # 指数退避: 2, 4, 8秒...
+                delay = base_delay * (2 ** attempt)
                 if self.config.get("debug_mode", False):
-                    logger.info(f"[{mode}] 第{attempt + 1}次尝试失败，{retry_delay}秒后重试: {result}")
-                await asyncio.sleep(retry_delay)
+                    logger.info(f"[{mode}] 第{attempt + 1}次失败，{delay}秒后重试: {result}")
+                await asyncio.sleep(delay)
         
         return False, f"重试{max_retries}次后仍失败: {last_error}"
     

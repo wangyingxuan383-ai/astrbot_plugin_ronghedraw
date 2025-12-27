@@ -274,7 +274,7 @@
     "retry_delay": {
         "description": "【网络】重试间隔(秒)",
         "type": "int",
-        "hint": "每次重试前等待的秒数。",
+        "hint": "重试基础间隔秒数。使用指数退避：第1次等待N秒，第2次等待2N秒...",
         "default": 2
     },
     "prompt_list": {
