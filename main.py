@@ -518,6 +518,11 @@ class Main(Star):
                         message = result["choices"][0].get("message", {})
                         full_content = message.get("content", "")
                     
+                    # 检查空响应
+                    if not full_content or not full_content.strip():
+                        # 可能是模型不支持通过OpenAI格式生成图片
+                        return False, f"API返回空内容，该模型可能不支持图片生成。请尝试使用Gemini原生模式(g文/g图)或更换模型。"
+                    
                     # 提取base64或URL
                     b64_match = re.search(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+', full_content)
                     if b64_match:
@@ -527,14 +532,14 @@ class Main(Star):
                         except Exception:
                             pass
                     
-                    url_match = re.search(r'https?://[^\s<>")\\]]+', full_content)
+                    url_match = re.search(r'https?://[^\s<>")\\]+', full_content)
                     if url_match:
                         img_url = url_match.group(0).rstrip(".,;:!?)")
                         img_data = await self._download_image(img_url)
                         if img_data:
                             return True, img_data
                     
-                    return False, f"未找到图片: {full_content[:200]}"
+                    return False, f"响应中未找到图片: {full_content[:150]}"
         
         except asyncio.TimeoutError:
             return False, "请求超时"
