@@ -462,7 +462,7 @@ class Main(Star):
         api_key = await self._get_api_key("generic")
         model = self.config.get("generic_default_model", "nano-banana")
         resolution = self.config.get("generic_resolution", "1K")
-        aspect_ratio = self.config.get("generic_aspect_ratio", "1:1")
+        aspect_ratio = self.config.get("generic_aspect_ratio", "自动")
         
         if not api_url or not api_key:
             return False, "Generic API 未配置"
