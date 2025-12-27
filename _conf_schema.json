@@ -71,6 +71,32 @@
         "type": "string",
         "default": "nano-banana"
     },
+    "generic_resolution": {
+        "description": "【Generic模式】输出分辨率",
+        "type": "string",
+        "hint": "支持Gemini模型的分辨率设置。",
+        "default": "1K",
+        "options": [
+            "1K",
+            "2K",
+            "4K"
+        ]
+    },
+    "generic_aspect_ratio": {
+        "description": "【Generic模式】宽高比",
+        "type": "string",
+        "hint": "文生图时的宽高比，图生图会自动使用输入图片的比例。",
+        "default": "1:1",
+        "options": [
+            "1:1",
+            "2:3",
+            "3:2",
+            "3:4",
+            "4:3",
+            "9:16",
+            "16:9"
+        ]
+    },
     "gemini_api_url": {
         "description": "【Gemini模式】API地址",
         "type": "string",

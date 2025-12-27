@@ -35,7 +35,7 @@ from . import limit_manager
     "astrbot_plugin_ronghedraw",
     "Antigravity",
     "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini 三种 API 模式",
-    "1.1.8",
+    "1.1.9",
     "https://github.com/wangyingxuan383-ai/astrbot_plugin_ronghedraw",
 )
 class Main(Star):
@@ -457,10 +457,12 @@ class Main(Star):
             return False, f"请求异常: {e}"
     
     async def _call_generic_api(self, images: List[bytes], prompt: str) -> Tuple[bool, Any]:
-        """调用Generic API (OpenAI通用格式，非流式)"""
+        """调用Generic API (OpenAI通用格式，非流式，支持Gemini模型)"""
         api_url = self.config.get("generic_api_url", "")
         api_key = await self._get_api_key("generic")
         model = self.config.get("generic_default_model", "nano-banana")
+        resolution = self.config.get("generic_resolution", "1K")
+        aspect_ratio = self.config.get("generic_aspect_ratio", "1:1")
         
         if not api_url or not api_key:
             return False, "Generic API 未配置"
@@ -479,12 +481,20 @@ class Main(Star):
             final_prompt = f"Generate a high quality image: {prompt}"
             messages = [{"role": "user", "content": final_prompt}]
         
-        # 非流式请求
+        # 构建generationConfig - 关键！支持Gemini模型图片生成
+        image_config = {"imageSize": resolution}
+        if not images:  # 文生图时可以指定宽高比
+            image_config["aspectRatio"] = aspect_ratio
+        
+        # 非流式请求 - 添加modalities和generationConfig
         payload = {
             "model": model,
             "messages": messages,
             "stream": False,
-            "max_tokens": 4000
+            "modalities": ["image", "text"],  # 关键参数！指定支持图片输出
+            "generationConfig": {
+                "imageConfig": image_config
+            }
         }
         
         headers = {
@@ -496,7 +506,7 @@ class Main(Star):
         proxy = self.config.get("proxy_url") if self.config.get("generic_use_proxy") else None
         
         if self.config.get("debug_mode", False):
-            logger.info(f"[Generic] 请求: model={model}, stream=False, images={len(images)}")
+            logger.info(f"[Generic] 请求: model={model}, resolution={resolution}, aspectRatio={aspect_ratio}, images={len(images)}")
         
         try:
             async with aiohttp.ClientSession() as session:
