@@ -625,7 +625,8 @@ class Main(Star):
         
         headers = {
             "Content-Type": "application/json",
-            "x-goog-api-key": api_key
+            "x-goog-api-key": api_key,
+            "Authorization": f"Bearer {api_key}"  # 兼容代理API
         }
         
         timeout = self.config.get("timeout", 120)
