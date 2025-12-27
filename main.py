@@ -648,7 +648,7 @@ class Main(Star):
                     if "error" in data:
                         return False, f"错误: {data['error']}"
                     
-                    # 提取图片 - 获取最后一张
+                    # 提取图片 - 首先尝试Gemini原生格式
                     try:
                         all_images = []
                         for candidate in data.get("candidates", []):
@@ -663,6 +663,19 @@ class Main(Star):
                             return True, all_images[-1]
                     except Exception:
                         pass
+                    
+                    # 如果代理API返回OpenAI格式，检测并给出明确错误
+                    if "choices" in data:
+                        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                        if not content or not content.strip():
+                            return False, f"代理API不支持Gemini图片生成。请使用Gemini原生模式(#g文/#g图)或更换模型。"
+                        # 尝试从content中提取图片
+                        b64_match = re.search(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+', content)
+                        if b64_match:
+                            try:
+                                return True, base64.b64decode(b64_match.group(0).split(",")[1])
+                            except Exception:
+                                pass
                     
                     return False, f"未找到图片: {str(data)[:200]}"
         
