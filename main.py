@@ -531,8 +531,10 @@ class Main(Star):
                     
                     # 检查空响应
                     if not full_content or not full_content.strip():
-                        # 可能是模型不支持通过OpenAI格式生成图片
-                        return False, f"API返回空内容，该模型可能不支持图片生成。请尝试使用Gemini原生模式(g文/g图)或更换模型。"
+                        # 检测是否使用Gemini模型
+                        if "gemini" in model.lower():
+                            return False, f"Gemini模型不支持OpenAI格式图片生成。请使用Gemini原生模式: #g文/#g图 命令"
+                        return False, f"API返回空内容，该模型可能不支持图片生成。请尝试更换模型。"
                     
                     # 提取base64或URL
                     b64_match = re.search(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+', full_content)
