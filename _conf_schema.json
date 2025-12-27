@@ -85,9 +85,10 @@
     "generic_aspect_ratio": {
         "description": "【Generic模式】宽高比",
         "type": "string",
-        "hint": "文生图时的宽高比，图生图会自动使用输入图片的比例。",
-        "default": "1:1",
+        "hint": "文生图时的宽高比。选择'自动'让模型自动决定。图生图会自动使用输入图片的比例。",
+        "default": "自动",
         "options": [
+            "自动",
             "1:1",
             "2:3",
             "3:2",

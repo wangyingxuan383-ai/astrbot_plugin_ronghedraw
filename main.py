@@ -483,7 +483,8 @@ class Main(Star):
         
         # 构建generationConfig - 关键！支持Gemini模型图片生成
         image_config = {"imageSize": resolution}
-        if not images:  # 文生图时可以指定宽高比
+        # 文生图时可以指定宽高比，"自动"则不传让模型自动决定
+        if not images and aspect_ratio and aspect_ratio != "自动":
             image_config["aspectRatio"] = aspect_ratio
         
         # 非流式请求 - 添加modalities和generationConfig
