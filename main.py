@@ -35,7 +35,7 @@ from . import limit_manager
     "astrbot_plugin_ronghedraw",
     "Antigravity",
     "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini 三种 API 模式",
-    "1.1.6",
+    "1.1.7",
     "https://github.com/wangyingxuan383-ai/astrbot_plugin_ronghedraw",
 )
 class Main(Star):
@@ -644,13 +644,36 @@ class Main(Star):
             return False, f"请求异常: {e}"
     
     async def generate(self, mode: str, images: List[bytes], prompt: str) -> Tuple[bool, Any]:
-        """统一生成入口"""
-        if mode == "flow":
-            return await self._call_flow_api(images, prompt)
-        elif mode == "gemini":
-            return await self._call_gemini_api(images, prompt)
-        else:
-            return await self._call_generic_api(images, prompt)
+        """统一生成入口（带重试机制）"""
+        max_retries = self.config.get("max_retries", 3)
+        retry_delay = self.config.get("retry_delay", 2)
+        
+        last_error = "未知错误"
+        
+        for attempt in range(max_retries):
+            if mode == "flow":
+                success, result = await self._call_flow_api(images, prompt)
+            elif mode == "gemini":
+                success, result = await self._call_gemini_api(images, prompt)
+            else:
+                success, result = await self._call_generic_api(images, prompt)
+            
+            if success:
+                return True, result
+            
+            last_error = result
+            
+            # 如果是明确的配置错误，不重试
+            if any(err in str(result) for err in ["未配置", "API Key", "配置错误"]):
+                return False, result
+            
+            # 还有重试机会
+            if attempt < max_retries - 1:
+                if self.config.get("debug_mode", False):
+                    logger.info(f"[{mode}] 第{attempt + 1}次尝试失败，{retry_delay}秒后重试: {result}")
+                await asyncio.sleep(retry_delay)
+        
+        return False, f"重试{max_retries}次后仍失败: {last_error}"
     
     # ================== 撤回功能 ==================
     

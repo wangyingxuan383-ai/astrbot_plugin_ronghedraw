@@ -265,6 +265,18 @@
         "type": "int",
         "default": 120
     },
+    "max_retries": {
+        "description": "【网络】最大重试次数",
+        "type": "int",
+        "hint": "生成失败时的重试次数。设为1则不重试。",
+        "default": 3
+    },
+    "retry_delay": {
+        "description": "【网络】重试间隔(秒)",
+        "type": "int",
+        "hint": "每次重试前等待的秒数。",
+        "default": 2
+    },
     "prompt_list": {
         "description": "【预设】提示词预设列表",
         "type": "list",
