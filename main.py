@@ -1429,22 +1429,27 @@ g = Gemini (仅白名单, 4K输出)
         self,
         event: AstrMessageEvent,
         prompt: str,
+        use_message_images: bool = False,
         image_urls: Optional[List[str]] = None
     ):
         '''
-        生成图片。prompt为画面描述，可优化用户原话。image_urls为参考图URL列表（可选可多个），不传则文生图，传入则图生图。
+        生成图片。prompt为画面描述，可优化用户原话。
         
-        重要提示:
-        1. URL必须以http(s)开头
-        2. 禁止使用gchat.qpic.cn或multimedia.nt.qq.com.cn域名的URL（这些是QQ群聊图片临时链接，无法下载）
-        3. 如需使用用户头像，请先调用get_avatar工具获取头像URL
-        4. 如需使用用户发送的图片，应从消息中直接获取可访问的图片URL，而非gchat.qpic.cn链接
+        获取参考图的两种方式（二选一）：
+        1. use_message_images=true：自动获取用户消息中的图片（推荐，支持QQ群聊图片）
+        2. image_urls：手动传入图片URL列表（仅支持公网可访问的URL，不支持gchat.qpic.cn）
+        
+        重要提示：
+        - 如果用户发送了图片并希望对图片进行处理，设置use_message_images=true
+        - gchat.qpic.cn是QQ临时链接，无法直接下载，请使用use_message_images代替
+        - 如需使用用户头像，请调用get_avatar获取URL后传入image_urls
         
         调用成功后图片会自动发送给用户，可以用自然语言评论。
         
         Args:
             prompt (string): 画面描述
-            image_urls (array[string], optional): 参考图URL列表（支持多图，禁止gchat.qpic.cn）
+            use_message_images (boolean, optional): 是否自动获取用户消息中的图片（默认false），推荐设为true
+            image_urls (array[string], optional): 参考图URL列表（仅限公网URL，不支持gchat.qpic.cn）
         '''
         if not self.config.get("enable_llm_tool", False):
             yield event.plain_result("LLM 绘图工具未启用")
@@ -1481,10 +1486,17 @@ g = Gemini (仅白名单, 4K输出)
             yield event.plain_result(f"❌ {limit_msg}")
             return
         
-        # 处理图片URL（如果AI提供了）
+        # 处理图片
         images = []
         
-        if image_urls:
+        # 方式1: 从用户消息中直接获取图片（推荐，支持QQ群聊图片）
+        if use_message_images:
+            images = await self.get_images(event)
+            if self.config.get("debug_mode", False):
+                logger.info(f"[LLM Tool] 从消息中获取了 {len(images)} 张图片")
+        
+        # 方式2: 从AI提供的URL列表下载图片（仅支持公网URL）
+        if image_urls and not images:  # 只有在use_message_images未获取到图片时才使用URL
             skipped_qq_urls = []
             for url in image_urls:
                 # URL格式检查
@@ -1502,7 +1514,7 @@ g = Gemini (仅白名单, 4K输出)
                 if img_data:
                     images.append(img_data)
             
-            # 如果所有URL都被跳过，提示AI
+            # 如果所有URL都被跳过，提示使用use_message_images
             if skipped_qq_urls and not images:
                 yield event.plain_result("无法使用QQ群聊图片，请使用头像URL或其他可访问的图片链接")
                 return
