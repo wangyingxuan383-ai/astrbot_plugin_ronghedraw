@@ -251,11 +251,25 @@ class Main(Star):
         return None
     
     async def get_images(self, event: AstrMessageEvent) -> List[bytes]:
-        """获取消息中的所有图片（支持多图，合并回复图片、当前消息图片、@用户头像）"""
+        """
+        获取消息中的所有图片（支持多图，合并回复图片、当前消息图片、@用户头像）
+        参照gemini_image_ref实现At自动过滤：过滤触发机器人的@和回复自动@
+        """
         images: List[bytes] = []
-        at_users: List[str] = []
-        
         chain = event.message_obj.message
+        
+        # 0. 预扫描：获取回复发送者ID和统计At次数（用于过滤自动@）
+        reply_sender_id = None
+        at_counts: dict = {}
+        
+        for seg in chain:
+            if isinstance(seg, Reply):
+                if hasattr(seg, 'sender_id') and seg.sender_id:
+                    reply_sender_id = str(seg.sender_id)
+            elif isinstance(seg, At):
+                if hasattr(seg, 'qq') and seg.qq != "all":
+                    uid = str(seg.qq)
+                    at_counts[uid] = at_counts.get(uid, 0) + 1
         
         # 1. 回复链中的图片
         for seg in chain:
@@ -280,14 +294,30 @@ class Main(Star):
                     except Exception:
                         pass
         
-        # 3. @用户头像（始终收集，与其他图片合并）
-        for seg in chain:
-            if isinstance(seg, At):
-                at_users.append(str(seg.qq))
+        # 3. @用户头像（带自动过滤逻辑）
+        self_id = str(event.get_self_id()).strip() if hasattr(event, 'get_self_id') else ""
         
-        for uid in at_users:
-            if avatar := await self._get_avatar(uid):
-                images.append(avatar)
+        for seg in chain:
+            if isinstance(seg, At) and hasattr(seg, 'qq') and seg.qq != "all":
+                uid = str(seg.qq)
+                
+                # 过滤1：回复消息自动带的@（仅出现1次且是回复发送者）
+                if reply_sender_id and uid == reply_sender_id:
+                    if at_counts.get(uid, 0) == 1:
+                        if self.config.get("debug_mode", False):
+                            logger.debug(f"[get_images] 过滤回复自动@: {uid}")
+                        continue
+                
+                # 过滤2：触发机器人的@（仅出现1次且是机器人自己）
+                if self_id and uid == self_id:
+                    if at_counts.get(uid, 0) == 1:
+                        if self.config.get("debug_mode", False):
+                            logger.debug(f"[get_images] 过滤机器人触发@: {uid}")
+                        continue
+                
+                # 通过过滤，获取头像
+                if avatar := await self._get_avatar(uid):
+                    images.append(avatar)
         
         return images
     
