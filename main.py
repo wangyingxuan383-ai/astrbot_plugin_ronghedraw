@@ -166,12 +166,8 @@ class Main(Star):
         
         for i in range(3):
             try:
-                # 使用复用的session
-                if not self._http_session or self._http_session.closed:
-                    import aiohttp
-                    self._http_session = aiohttp.ClientSession()
-                
-                async with self._http_session.get(url, proxy=proxy, timeout=timeout) as resp:
+                session = await self._get_session()
+                async with session.get(url, proxy=proxy, timeout=timeout) as resp:
                     resp.raise_for_status()
                     return await resp.read()
             except Exception as e:
