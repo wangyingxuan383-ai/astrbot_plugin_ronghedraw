@@ -134,6 +134,12 @@ class Main(Star):
                 key, val = item.split(":", 1)
                 self.prompt_map[key.strip()] = val.strip()
     
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """获取或创建HTTP session"""
+        if not self._http_session or self._http_session.closed:
+            self._http_session = aiohttp.ClientSession()
+        return self._http_session
+    
     # ================== 图片处理 ==================
     
     async def _download_image(self, url: str) -> bytes | None:
@@ -321,12 +327,12 @@ class Main(Star):
         sign = hashlib.md5((appid + text + salt + key).encode()).hexdigest()
         
         try:
-            async with aiohttp.ClientSession() as session:
-                params = {
-                    "q": text, "from": "zh", "to": "en",
-                    "appid": appid, "salt": salt, "sign": sign
-                }
-                async with session.get("https://fanyi-api.baidu.com/api/trans/vip/translate", 
+            session = await self._get_session()
+            params = {
+                "q": text, "from": "zh", "to": "en",
+                "appid": appid, "salt": salt, "sign": sign
+            }
+            async with session.get("https://fanyi-api.baidu.com/api/trans/vip/translate", 
                                        params=params, timeout=10) as resp:
                     data = await resp.json()
                     if "trans_result" in data:
@@ -419,9 +425,9 @@ class Main(Star):
         proxy = self.config.get("proxy_url") if self.config.get("flow_use_proxy") else None
         
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(api_url, json=payload, headers=headers, 
-                                        proxy=proxy, timeout=timeout) as resp:
+            session = await self._get_session()
+            async with session.post(api_url, json=payload, headers=headers, 
+                                    proxy=proxy, timeout=timeout) as resp:
                     if resp.status != 200:
                         text = await resp.text()
                         return False, f"API错误 ({resp.status}): {text[:200]}"
@@ -517,9 +523,9 @@ class Main(Star):
             logger.info(f"[Generic-OpenAI] 请求: model={model}, resolution={resolution}, images={len(images)}")
         
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(api_url, json=payload, headers=headers,
-                                        proxy=proxy, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+            session = await self._get_session()
+            async with session.post(api_url, json=payload, headers=headers,
+                                    proxy=proxy, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
                     if resp.status != 200:
                         text = await resp.text()
                         return False, f"API错误 ({resp.status}): {text[:200]}"
@@ -633,9 +639,9 @@ class Main(Star):
             logger.info(f"[Generic-Gemini] 请求: model={model}, resolution={resolution}, images={len(images)}")
         
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(final_url, json=payload, headers=headers,
-                                        proxy=proxy, timeout=timeout) as resp:
+            session = await self._get_session()
+            async with session.post(final_url, json=payload, headers=headers,
+                                    proxy=proxy, timeout=timeout) as resp:
                     if resp.status != 200:
                         text = await resp.text()
                         return False, f"API错误 ({resp.status}): {text[:200]}"
@@ -747,9 +753,9 @@ class Main(Star):
         proxy = self.config.get("proxy_url") if self.config.get("gemini_use_proxy") else None
         
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(final_url, json=payload, headers=headers,
-                                        proxy=proxy, timeout=timeout) as resp:
+            session = await self._get_session()
+            async with session.post(final_url, json=payload, headers=headers,
+                                    proxy=proxy, timeout=timeout) as resp:
                     if resp.status != 200:
                         text = await resp.text()
                         return False, f"API错误 ({resp.status}): {text[:200]}"
