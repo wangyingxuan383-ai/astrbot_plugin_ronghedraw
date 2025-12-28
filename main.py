@@ -1432,11 +1432,19 @@ g = Gemini (仅白名单, 4K输出)
         image_urls: Optional[List[str]] = None
     ):
         '''
-        生成图片。prompt为画面描述，可优化用户原话。image_urls为参考图URL列表（可选可多个），不传则文生图，传入则图生图。URL需http(s)开头。调用成功后图片会自动发送给用户，可以用自然语言评论。
+        生成图片。prompt为画面描述，可优化用户原话。image_urls为参考图URL列表（可选可多个），不传则文生图，传入则图生图。
+        
+        重要提示:
+        1. URL必须以http(s)开头
+        2. 禁止使用gchat.qpic.cn或multimedia.nt.qq.com.cn域名的URL（这些是QQ群聊图片临时链接，无法下载）
+        3. 如需使用用户头像，请先调用get_avatar工具获取头像URL
+        4. 如需使用用户发送的图片，应从消息中直接获取可访问的图片URL，而非gchat.qpic.cn链接
+        
+        调用成功后图片会自动发送给用户，可以用自然语言评论。
         
         Args:
             prompt (string): 画面描述
-            image_urls (array[string], optional): 参考图URL列表（支持多图）
+            image_urls (array[string], optional): 参考图URL列表（支持多图，禁止gchat.qpic.cn）
         '''
         if not self.config.get("enable_llm_tool", False):
             yield event.plain_result("LLM 绘图工具未启用")
@@ -1477,15 +1485,27 @@ g = Gemini (仅白名单, 4K输出)
         images = []
         
         if image_urls:
+            skipped_qq_urls = []
             for url in image_urls:
                 # URL格式检查
                 if not url.startswith(('http://', 'https://')):
                     continue  # 静默跳过无效URL
                 
+                # 检测QQ群聊图片临时链接（这些URL无法直接下载）
+                if 'gchat.qpic.cn' in url or 'multimedia.nt.qq.com.cn' in url:
+                    skipped_qq_urls.append(url)
+                    logger.warning(f"[LLM Tool] 跳过无法下载的QQ图片临时链接: {url[:80]}...")
+                    continue
+                
                 # 下载图片
                 img_data = await self._download_image(url)
                 if img_data:
                     images.append(img_data)
+            
+            # 如果所有URL都被跳过，提示AI
+            if skipped_qq_urls and not images:
+                yield event.plain_result("无法使用QQ群聊图片，请使用头像URL或其他可访问的图片链接")
+                return
         
         # 清理提示词中的@用户信息
         clean_prompt = self._clean_prompt(prompt, event)
@@ -1511,8 +1531,14 @@ g = Gemini (仅白名单, 4K输出)
         '''
         获取QQ头像URL。返回URL字符串供generate_image使用。
         
+        重要提示:
+        1. 必须使用真实的QQ号，不要编造或猜测
+        2. 如需获取群成员的QQ号，请先调用get_group_members_info工具获取群成员列表
+        3. 从消息中的[At:xxx]格式可以直接提取被@用户的QQ号（xxx即为QQ号）
+        4. 从get_group_members_info返回的user_id字段获取成员QQ号
+        
         Args:
-            user_id (string): QQ号
+            user_id (string): 真实的QQ号（必须是数字）
         '''
         user_id = str(user_id).strip()
         if not user_id.isdigit():
