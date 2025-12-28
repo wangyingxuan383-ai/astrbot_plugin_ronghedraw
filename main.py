@@ -135,9 +135,26 @@ class Main(Star):
                 self.prompt_map[key.strip()] = val.strip()
     
     async def _get_session(self) -> aiohttp.ClientSession:
-        """获取或创建HTTP session"""
+        """获取或创建HTTP session (带连接池优化)"""
         if not self._http_session or self._http_session.closed:
-            self._http_session = aiohttp.ClientSession()
+            # 配置连接池：限制并发连接数，启用keepalive
+            connector = aiohttp.TCPConnector(
+                limit=10,              # 总连接数限制
+                limit_per_host=5,      # 每个主机连接数限制
+                ttl_dns_cache=300,     # DNS缓存5分钟
+                enable_cleanup_closed=True
+            )
+            # 默认超时配置
+            timeout_val = self.config.get("timeout", 120)
+            timeout = aiohttp.ClientTimeout(
+                total=timeout_val,      # 总超时
+                connect=30,             # 连接超时
+                sock_read=timeout_val   # 读取超时
+            )
+            self._http_session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=timeout
+            )
         return self._http_session
     
     # ================== 图片处理 ==================
@@ -333,10 +350,10 @@ class Main(Star):
                 "appid": appid, "salt": salt, "sign": sign
             }
             async with session.get("https://fanyi-api.baidu.com/api/trans/vip/translate", 
-                                       params=params, timeout=10) as resp:
-                    data = await resp.json()
-                    if "trans_result" in data:
-                        return data["trans_result"][0]["dst"]
+                                   params=params, timeout=10) as resp:
+                data = await resp.json()
+                if "trans_result" in data:
+                    return data["trans_result"][0]["dst"]
         except Exception as e:
             logger.warning(f"翻译失败: {e}")
         
@@ -428,34 +445,34 @@ class Main(Star):
             session = await self._get_session()
             async with session.post(api_url, json=payload, headers=headers, 
                                     proxy=proxy, timeout=timeout) as resp:
-                    if resp.status != 200:
-                        text = await resp.text()
-                        return False, f"API错误 ({resp.status}): {text[:200]}"
-                    
-                    # 解析流式响应
-                    full_content = ""
-                    async for line in resp.content:
-                        line = line.decode().strip()
-                        if line.startswith("data: ") and line != "data: [DONE]":
-                            try:
-                                chunk = json.loads(line[6:])
-                                if "choices" in chunk and chunk["choices"]:
-                                    delta = chunk["choices"][0].get("delta", {})
-                                    if "content" in delta:
-                                        full_content += delta["content"]
-                            except Exception:
-                                pass
-                    
-                    # 提取图片URL
-                    url_match = re.search(r'https?://[^\s<>")\]]+', full_content)
-                    if url_match:
-                        img_url = url_match.group(0).rstrip(".,;:!?)")
-                        img_data = await self._download_image(img_url)
-                        if img_data:
-                            return True, img_data
-                        return False, f"图片下载失败: {img_url}"
-                    
-                    return False, f"未找到图片URL: {full_content[:200]}"
+                if resp.status != 200:
+                    text = await resp.text()
+                    return False, f"API错误 ({resp.status}): {text[:200]}"
+                
+                # 解析流式响应
+                full_content = ""
+                async for line in resp.content:
+                    line = line.decode().strip()
+                    if line.startswith("data: ") and line != "data: [DONE]":
+                        try:
+                            chunk = json.loads(line[6:])
+                            if "choices" in chunk and chunk["choices"]:
+                                delta = chunk["choices"][0].get("delta", {})
+                                if "content" in delta:
+                                    full_content += delta["content"]
+                        except Exception:
+                            pass
+                
+                # 提取图片URL
+                url_match = re.search(r'https?://[^\s<>")\\]]+', full_content)
+                if url_match:
+                    img_url = url_match.group(0).rstrip(".,;:!?)")
+                    img_data = await self._download_image(img_url)
+                    if img_data:
+                        return True, img_data
+                    return False, f"图片下载失败: {img_url}"
+                
+                return False, f"未找到图片URL: {full_content[:200]}"
         
         except asyncio.TimeoutError:
             return False, "请求超时"
@@ -526,43 +543,43 @@ class Main(Star):
             session = await self._get_session()
             async with session.post(api_url, json=payload, headers=headers,
                                     proxy=proxy, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
-                    if resp.status != 200:
-                        text = await resp.text()
-                        return False, f"API错误 ({resp.status}): {text[:200]}"
-                    
-                    # 非流式响应直接解析JSON
-                    result = await resp.json()
-                    
-                    if self.config.get("debug_mode", False):
-                        logger.info(f"[Generic] 响应: {str(result)[:500]}")
-                    
-                    # 提取内容
-                    full_content = ""
-                    if "choices" in result and result["choices"]:
-                        message = result["choices"][0].get("message", {})
-                        full_content = message.get("content", "")
-                    
-                    # 检查空响应
-                    if not full_content or not full_content.strip():
-                        return False, "API返回空内容"
-                    
-                    # 提取base64或URL
-                    b64_match = re.search(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+', full_content)
-                    if b64_match:
-                        try:
-                            b64 = b64_match.group(0).split(",")[1]
-                            return True, base64.b64decode(b64)
-                        except Exception:
-                            pass
-                    
-                    url_match = re.search(r'https?://[^\s<>")\\]+', full_content)
-                    if url_match:
-                        img_url = url_match.group(0).rstrip(".,;:!?)")
-                        img_data = await self._download_image(img_url)
-                        if img_data:
-                            return True, img_data
-                    
-                    return False, f"响应中未找到图片: {full_content[:150]}"
+                if resp.status != 200:
+                    text = await resp.text()
+                    return False, f"API错误 ({resp.status}): {text[:200]}"
+                
+                # 非流式响应直接解析JSON
+                result = await resp.json()
+                
+                if self.config.get("debug_mode", False):
+                    logger.info(f"[Generic] 响应: {str(result)[:500]}")
+                
+                # 提取内容
+                full_content = ""
+                if "choices" in result and result["choices"]:
+                    message = result["choices"][0].get("message", {})
+                    full_content = message.get("content", "")
+                
+                # 检查空响应
+                if not full_content or not full_content.strip():
+                    return False, "API返回空内容"
+                
+                # 提取base64或URL
+                b64_match = re.search(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+', full_content)
+                if b64_match:
+                    try:
+                        b64 = b64_match.group(0).split(",")[1]
+                        return True, base64.b64decode(b64)
+                    except Exception:
+                        pass
+                
+                url_match = re.search(r'https?://[^\s<>")\\]+', full_content)
+                if url_match:
+                    img_url = url_match.group(0).rstrip(".,;:!?)")
+                    img_data = await self._download_image(img_url)
+                    if img_data:
+                        return True, img_data
+                
+                return False, f"响应中未找到图片: {full_content[:150]}"
         
         except asyncio.TimeoutError:
             return False, "请求超时"
@@ -642,45 +659,45 @@ class Main(Star):
             session = await self._get_session()
             async with session.post(final_url, json=payload, headers=headers,
                                     proxy=proxy, timeout=timeout) as resp:
-                    if resp.status != 200:
-                        text = await resp.text()
-                        return False, f"API错误 ({resp.status}): {text[:200]}"
+                if resp.status != 200:
+                    text = await resp.text()
+                    return False, f"API错误 ({resp.status}): {text[:200]}"
+                
+                data = await resp.json()
+                
+                if "error" in data:
+                    return False, f"错误: {data['error']}"
+                
+                # 提取图片 - 首先尝试Gemini原生格式
+                try:
+                    all_images = []
+                    for candidate in data.get("candidates", []):
+                        for part in candidate.get("content", {}).get("parts", []):
+                            if "inlineData" in part:
+                                b64 = part["inlineData"]["data"]
+                                all_images.append(base64.b64decode(b64))
                     
-                    data = await resp.json()
-                    
-                    if "error" in data:
-                        return False, f"错误: {data['error']}"
-                    
-                    # 提取图片 - 首先尝试Gemini原生格式
-                    try:
-                        all_images = []
-                        for candidate in data.get("candidates", []):
-                            for part in candidate.get("content", {}).get("parts", []):
-                                if "inlineData" in part:
-                                    b64 = part["inlineData"]["data"]
-                                    all_images.append(base64.b64decode(b64))
-                        
-                        if all_images:
-                            if self.config.get("debug_mode", False):
-                                logger.info(f"[Generic-Gemini] 收到 {len(all_images)} 张图片，返回最后一张")
-                            return True, all_images[-1]
-                    except Exception:
-                        pass
-                    
-                    # 如果代理API返回OpenAI格式，尝试提取
-                    if "choices" in data:
-                        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                        if not content or not content.strip():
-                            return False, "API返回空内容"
-                        # 尝试从content中提取图片
-                        b64_match = re.search(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+', content)
-                        if b64_match:
-                            try:
-                                return True, base64.b64decode(b64_match.group(0).split(",")[1])
-                            except Exception:
-                                pass
-                    
-                    return False, f"未找到图片: {str(data)[:200]}"
+                    if all_images:
+                        if self.config.get("debug_mode", False):
+                            logger.info(f"[Generic-Gemini] 收到 {len(all_images)} 张图片，返回最后一张")
+                        return True, all_images[-1]
+                except Exception:
+                    pass
+                
+                # 如果代理API返回OpenAI格式，尝试提取
+                if "choices" in data:
+                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    if not content or not content.strip():
+                        return False, "API返回空内容"
+                    # 尝试从content中提取图片
+                    b64_match = re.search(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+', content)
+                    if b64_match:
+                        try:
+                            return True, base64.b64decode(b64_match.group(0).split(",")[1])
+                        except Exception:
+                            pass
+                
+                return False, f"未找到图片: {str(data)[:200]}"
         
         except asyncio.TimeoutError:
             return False, "请求超时"
@@ -756,33 +773,33 @@ class Main(Star):
             session = await self._get_session()
             async with session.post(final_url, json=payload, headers=headers,
                                     proxy=proxy, timeout=timeout) as resp:
-                    if resp.status != 200:
-                        text = await resp.text()
-                        return False, f"API错误 ({resp.status}): {text[:200]}"
+                if resp.status != 200:
+                    text = await resp.text()
+                    return False, f"API错误 ({resp.status}): {text[:200]}"
+                
+                data = await resp.json()
+                
+                if "error" in data:
+                    return False, f"错误: {data['error']}"
+                
+                # 提取图片 - 获取最后一张（第一张可能是1K预览，最后一张才是高分辨率）
+                try:
+                    all_images = []
+                    for candidate in data.get("candidates", []):
+                        for part in candidate.get("content", {}).get("parts", []):
+                            if "inlineData" in part:
+                                b64 = part["inlineData"]["data"]
+                                all_images.append(base64.b64decode(b64))
                     
-                    data = await resp.json()
-                    
-                    if "error" in data:
-                        return False, f"错误: {data['error']}"
-                    
-                    # 提取图片 - 获取最后一张（第一张可能是1K预览，最后一张才是高分辨率）
-                    try:
-                        all_images = []
-                        for candidate in data.get("candidates", []):
-                            for part in candidate.get("content", {}).get("parts", []):
-                                if "inlineData" in part:
-                                    b64 = part["inlineData"]["data"]
-                                    all_images.append(base64.b64decode(b64))
-                        
-                        if all_images:
-                            # 返回最后一张图片（高分辨率版本）
-                            if self.config.get("debug_mode", False):
-                                logger.info(f"[Gemini] 收到 {len(all_images)} 张图片，返回最后一张")
-                            return True, all_images[-1]
-                    except Exception:
-                        pass
-                    
-                    return False, f"未找到图片: {str(data)[:200]}"
+                    if all_images:
+                        # 返回最后一张图片（高分辨率版本）
+                        if self.config.get("debug_mode", False):
+                            logger.info(f"[Gemini] 收到 {len(all_images)} 张图片，返回最后一张")
+                        return True, all_images[-1]
+                except Exception:
+                    pass
+                
+                return False, f"未找到图片: {str(data)[:200]}"
         
         except asyncio.TimeoutError:
             return False, "请求超时"
