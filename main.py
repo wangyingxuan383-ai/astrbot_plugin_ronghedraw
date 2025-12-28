@@ -2,7 +2,7 @@
 RongheDraw 多模式绘图插件
 支持 Flow/Generic/Gemini 三种 API 模式
 作者: Antigravity
-版本: 1.1.9
+版本: 1.2.0
 """
 import asyncio
 import base64
@@ -35,7 +35,7 @@ from . import limit_manager
     "astrbot_plugin_ronghedraw",
     "Antigravity",
     "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini 三种 API 模式",
-    "1.1.9",
+    "1.2.0",
     "https://github.com/wangyingxuan383-ai/astrbot_plugin_ronghedraw",
 )
 class Main(Star):

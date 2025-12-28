@@ -1,9 +1,12 @@
-# RongheDraw 多模式绘图插件
-
-> AstrBot 绘图插件，支持 Flow/Generic/Gemini 三种 API 模式
-
-**作者**: Antigravity  
-**版本**: 1.1.9
+<div align="center">
+  <img src="logo.png" width="180" height="180" alt="RongheDraw Logo">
+  <h1>RongheDraw 多模式绘图插件</h1>
+  <p>支持 Flow/Generic/Gemini 三种 API 模式的 AstrBot 绘图插件</p>
+  <p>
+    <b>作者:</b> Antigravity &nbsp;|&nbsp; 
+    <b>版本:</b> 1.2.0
+  </p>
+</div>
 
 
 ---
@@ -104,8 +107,11 @@
 
 ### Generic 模式配置
 - `generic_api_url`: API 地址
-- `generic_api_keys`: API Key 池
+- `generic_api_key`: API 密钥
 - `generic_default_model`: 默认模型
+- `generic_api_format`: API 格式 (`openai`/`gemini`)，默认为 `openai`。使用 Gemini 模型时建议设为 `gemini`
+- `generic_resolution`: 分辨率 (1K/2K/4K)
+- `generic_aspect_ratio`: 默认纵横比
 - `generic_use_proxy`: 启用代理
 
 ### Gemini 模式配置
@@ -226,3 +232,24 @@ AI：好哦~ [先获取用户头像URL，再调用绘图工具]
 ## 📄 许可证
 
 MIT License
+
+---
+
+## 📅 更新日志
+
+### v1.2.0 (2025-12-28)
+
+**🚀 新特性**
+- **Generic 模式增强**: 支持切换 OpenAI/Gemini API 格式，完美兼容 Gemini 模型
+- **性能优化**: 实现 HTTP Session 连接池与复用，显著减少连接建立时间
+- **智能重试**: 优化重试机制，自动避开 401/403 等不可重试错误
+
+**⚡ 优化**
+- **连接池**: 限制最大并发连接数，启用 DNS 缓存
+- **API 兼容**: 修复 Gemini 格式的 URL 构建与认证头问题
+- **错误提示**: 更加友好、准确的错误信息反馈
+
+**🐛 修复**
+- 修复所有命令的参数签名问题，增强框架兼容性
+- 修复部分 API 调用的缩进问题
+- 修复图片下载未利用连接池的问题
