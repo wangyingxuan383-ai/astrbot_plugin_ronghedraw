@@ -28,6 +28,10 @@ from astrbot.api.event import filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.message.components import At, Image, Reply, Plain
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
+try:
+    from astrbot.core.utils.io import download_image_by_url
+except ImportError:
+    download_image_by_url = None
 from . import limit_manager
 
 
@@ -160,7 +164,31 @@ class Main(Star):
     # ================== 图片处理 ==================
     
     async def _download_image(self, url: str) -> bytes | None:
-        """下载图片"""
+        """
+        下载图片（参照gemini_image_ref实现）
+        优先使用AstrBot内置工具download_image_by_url，它能正确处理QQ图片链接
+        """
+        # 方式1：尝试作为本地文件读取
+        if Path(url).is_file():
+            try:
+                return Path(url).read_bytes()
+            except Exception:
+                pass
+        
+        # 方式2：使用AstrBot内置下载工具（推荐，能处理QQ图片链接）
+        if download_image_by_url:
+            try:
+                path = await download_image_by_url(url)
+                if path and Path(path).is_file():
+                    data = Path(path).read_bytes()
+                    if self.config.get("debug_mode", False):
+                        logger.info(f"[download_image_by_url] 成功下载: {url[:60]}...")
+                    return data
+            except Exception as e:
+                if self.config.get("debug_mode", False):
+                    logger.warning(f"[download_image_by_url] 下载失败: {e}")
+        
+        # 方式3：回退到直接HTTP请求（公网URL）
         timeout = self.config.get("timeout", 120)
         proxy = self.config.get("proxy_url") if self.config.get("use_proxy") else None
         
@@ -174,14 +202,15 @@ class Main(Star):
                 if i < 2:
                     await asyncio.sleep(1)
                 else:
-                    logger.error(f"下载图片失败: {url}, 错误: {e}")
+                    logger.error(f"下载图片失败: {url[:60]}..., 错误: {e}")
         return None
     
     async def _get_avatar(self, user_id: str) -> bytes | None:
-        """获取用户头像"""
+        """获取用户头像（参照gemini_image_ref使用q4.qlogo.cn）"""
         if not str(user_id).isdigit():
             return None
-        avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
+        # 使用q4.qlogo.cn，更稳定
+        avatar_url = f"https://q4.qlogo.cn/headimg_dl?dst_uin={user_id}&spec=640"
         return await self._download_image(avatar_url)
     
     def _extract_first_frame_sync(self, raw: bytes) -> bytes:
