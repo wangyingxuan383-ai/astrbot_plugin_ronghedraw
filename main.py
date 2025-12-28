@@ -1586,7 +1586,8 @@ g = Gemini (仅白名单, 4K输出)
             return f"错误：无效的QQ号 {user_id}"
         
         # 构造并返回头像URL（不发送消息，只返回给AI）
-        avatar_url = f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
+        # 使用q4.qlogo.cn与_get_avatar保持一致
+        avatar_url = f"https://q4.qlogo.cn/headimg_dl?dst_uin={user_id}&spec=640"
         return avatar_url
     
     
