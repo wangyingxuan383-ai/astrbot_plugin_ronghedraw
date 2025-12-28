@@ -930,25 +930,25 @@ class Main(Star):
     # ================== 文生图命令 ==================
     
     @filter.command("f文", alias={"f文生图"})
-    async def cmd_flow_text2img(self, event: AstrMessageEvent, **kwargs):
+    async def cmd_flow_text2img(self, event: AstrMessageEvent):
         """Flow模式文生图"""
         async for result in self._handle_text2img(event, "flow"):
             yield result
     
     @filter.command("o文", alias={"o文生图"})
-    async def cmd_generic_text2img(self, event: AstrMessageEvent, **kwargs):
+    async def cmd_generic_text2img(self, event: AstrMessageEvent):
         """Generic模式文生图"""
         async for result in self._handle_text2img(event, "generic"):
             yield result
     
     @filter.command("g文", alias={"g文生图"})
-    async def cmd_gemini_text2img(self, event: AstrMessageEvent, **kwargs):
+    async def cmd_gemini_text2img(self, event: AstrMessageEvent):
         """Gemini模式文生图"""
         async for result in self._handle_text2img(event, "gemini"):
             yield result
     
     @filter.command("文生图", alias={"文"})
-    async def cmd_default_text2img(self, event: AstrMessageEvent, **kwargs):
+    async def cmd_default_text2img(self, event: AstrMessageEvent):
         """默认模式文生图"""
         user_id = event.get_sender_id()
         group_id = event.get_group_id()
@@ -1024,25 +1024,25 @@ class Main(Star):
     # ================== 图生图命令 ==================
     
     @filter.command("f图", alias={"f图生图"})
-    async def cmd_flow_img2img(self, event: AstrMessageEvent, **kwargs):
+    async def cmd_flow_img2img(self, event: AstrMessageEvent):
         """Flow模式图生图"""
         async for result in self._handle_img2img(event, "flow"):
             yield result
     
     @filter.command("o图", alias={"o图生图"})
-    async def cmd_generic_img2img(self, event: AstrMessageEvent, **kwargs):
+    async def cmd_generic_img2img(self, event: AstrMessageEvent):
         """Generic模式图生图"""
         async for result in self._handle_img2img(event, "generic"):
             yield result
     
     @filter.command("g图", alias={"g图生图"})
-    async def cmd_gemini_img2img(self, event: AstrMessageEvent, **kwargs):
+    async def cmd_gemini_img2img(self, event: AstrMessageEvent):
         """Gemini模式图生图"""
         async for result in self._handle_img2img(event, "gemini"):
             yield result
     
     @filter.command("图生图", alias={"图"})
-    async def cmd_default_img2img(self, event: AstrMessageEvent, **kwargs):
+    async def cmd_default_img2img(self, event: AstrMessageEvent):
         """默认模式图生图"""
         user_id = event.get_sender_id()
         group_id = event.get_group_id()
@@ -1409,7 +1409,7 @@ g = Gemini (仅白名单, 4K输出)
             yield r
     
     @filter.command("随机", alias={"随机预设"})
-    async def cmd_default_random(self, event: AstrMessageEvent, **kwargs):
+    async def cmd_default_random(self, event: AstrMessageEvent):
         """默认模式随机预设"""
         all_presets = self._get_all_presets()
         if not all_presets:
