@@ -1409,7 +1409,7 @@ g = Gemini (仅白名单, 4K输出)
             yield r
     
     @filter.command("随机", alias={"随机预设"})
-    async def cmd_default_random(self, event: AstrMessageEvent):
+    async def cmd_default_random(self, event: AstrMessageEvent, ctx=None):
         """默认模式随机预设"""
         all_presets = self._get_all_presets()
         if not all_presets:
