@@ -116,9 +116,8 @@ class Main(Star):
     
     async def initialize(self):
         """插件激活时调用，用于初始化资源"""
-        # 创建HTTP session复用连接池
-        import aiohttp
-        self._http_session = aiohttp.ClientSession()
+        # 创建带连接池/超时配置的HTTP session
+        self._http_session = await self._get_session()
         
         # 验证配置
         self._validate_config()
@@ -190,12 +189,12 @@ class Main(Star):
         
         # 方式3：回退到直接HTTP请求（公网URL）
         timeout = self.config.get("timeout", 120)
-        proxy = self.config.get("proxy_url") if self.config.get("use_proxy") else None
+        timeout_obj = aiohttp.ClientTimeout(total=timeout)
         
         for i in range(3):
             try:
                 session = await self._get_session()
-                async with session.get(url, proxy=proxy, timeout=timeout) as resp:
+                async with session.get(url, timeout=timeout_obj) as resp:
                     resp.raise_for_status()
                     return await resp.read()
             except Exception as e:
@@ -339,17 +338,25 @@ class Main(Star):
         b64 = base64.b64encode(data).decode()
         return Image.fromBase64(b64)
     
-    def _compress_image(self, data: bytes, max_size: int = 1024, quality: int = 85) -> bytes:
-        """压缩图片，限制最大尺寸"""
+    def _compress_image(
+        self,
+        data: bytes,
+        max_size: int = 2048,
+        quality: int = 85,
+        size_threshold: int = 2 * 1024 * 1024,
+    ) -> bytes:
+        """压缩大图，限制最大尺寸与体积"""
         if PILImage is None:
             return data
         try:
             img = PILImage.open(io.BytesIO(data))
+            width, height = img.size
+            if width <= max_size and height <= max_size and len(data) <= size_threshold:
+                return data
             # 转换为RGB
             if img.mode in ('RGBA', 'P'):
                 img = img.convert('RGB')
             # 限制最大尺寸
-            width, height = img.size
             if width > max_size or height > max_size:
                 ratio = min(max_size / width, max_size / height)
                 new_size = (int(width * ratio), int(height * ratio))
@@ -362,6 +369,18 @@ class Main(Star):
         except Exception as e:
             logger.warning(f"图片压缩失败: {e}")
             return data
+
+    async def _maybe_compress_images(self, images: List[bytes]) -> List[bytes]:
+        """异步压缩大图，避免阻塞事件循环"""
+        if not images or PILImage is None:
+            return images
+        result = []
+        for img in images:
+            try:
+                result.append(await asyncio.to_thread(self._compress_image, img))
+            except Exception:
+                result.append(img)
+        return result
     
     def _clean_prompt(self, raw_text: str, event) -> str:
         """清理提示词，移除@用户信息（昵称和QQ号）"""
@@ -404,8 +423,11 @@ class Main(Star):
                 "q": text, "from": "zh", "to": "en",
                 "appid": appid, "salt": salt, "sign": sign
             }
-            async with session.get("https://fanyi-api.baidu.com/api/trans/vip/translate", 
-                                   params=params, timeout=10) as resp:
+            async with session.get(
+                "https://fanyi-api.baidu.com/api/trans/vip/translate",
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
                 data = await resp.json()
                 if "trans_result" in data:
                     return data["trans_result"][0]["dst"]
@@ -494,18 +516,25 @@ class Main(Star):
         }
         
         timeout = self.config.get("timeout", 120)
+        timeout_obj = aiohttp.ClientTimeout(total=timeout)
         proxy = self.config.get("proxy_url") if self.config.get("flow_use_proxy") else None
         
         try:
             session = await self._get_session()
-            async with session.post(api_url, json=payload, headers=headers, 
-                                    proxy=proxy, timeout=timeout) as resp:
+            async with session.post(
+                api_url,
+                json=payload,
+                headers=headers,
+                proxy=proxy,
+                timeout=timeout_obj,
+            ) as resp:
                 if resp.status != 200:
                     text = await resp.text()
                     return False, f"API错误 ({resp.status}): {text[:200]}"
                 
                 # 解析流式响应
                 full_content = ""
+                found_url = None
                 async for line in resp.content:
                     line = line.decode().strip()
                     if line.startswith("data: ") and line != "data: [DONE]":
@@ -515,13 +544,22 @@ class Main(Star):
                                 delta = chunk["choices"][0].get("delta", {})
                                 if "content" in delta:
                                     full_content += delta["content"]
+                                    if "http" in full_content:
+                                        url_match = re.search(r'https?://[^\s<>")\\]]+', full_content)
+                                        if url_match:
+                                            found_url = url_match.group(0).rstrip(".,;:!?)")
+                                            break
                         except Exception:
                             pass
                 
                 # 提取图片URL
-                url_match = re.search(r'https?://[^\s<>")\\]]+', full_content)
-                if url_match:
-                    img_url = url_match.group(0).rstrip(".,;:!?)")
+                img_url = found_url
+                if not img_url:
+                    url_match = re.search(r'https?://[^\s<>")\\]]+', full_content)
+                    if url_match:
+                        img_url = url_match.group(0).rstrip(".,;:!?)")
+                
+                if img_url:
                     img_data = await self._download_image(img_url)
                     if img_data:
                         return True, img_data
@@ -589,6 +627,7 @@ class Main(Star):
         }
         
         timeout = self.config.get("timeout", 120)
+        timeout_obj = aiohttp.ClientTimeout(total=timeout)
         proxy = self.config.get("proxy_url") if self.config.get("generic_use_proxy") else None
         
         if self.config.get("debug_mode", False):
@@ -677,15 +716,19 @@ class Main(Star):
             })
         
         # 构建生成配置
-        image_config = {"imageSize": resolution}
-        if not images and aspect_ratio and aspect_ratio != "自动":
-            image_config["aspectRatio"] = aspect_ratio
-        
+        use_image_config = self.config.get("gemini_use_image_config", True)
         generation_config = {
             "maxOutputTokens": 8192,
-            "responseModalities": ["image", "text"],
-            "imageConfig": image_config
+            "responseModalities": ["image", "text"]
         }
+        if use_image_config:
+            image_config = {"imageSize": resolution}
+            if not images and aspect_ratio and aspect_ratio != "自动":
+                image_config["aspectRatio"] = aspect_ratio
+            generation_config["imageConfig"] = image_config
+        else:
+            if not images and aspect_ratio and aspect_ratio != "自动":
+                generation_config["aspectRatio"] = aspect_ratio
         
         payload = {
             "contents": [{"parts": parts}],
@@ -713,7 +756,7 @@ class Main(Star):
         try:
             session = await self._get_session()
             async with session.post(final_url, json=payload, headers=headers,
-                                    proxy=proxy, timeout=timeout) as resp:
+                                    proxy=proxy, timeout=timeout_obj) as resp:
                 if resp.status != 200:
                     text = await resp.text()
                     return False, f"API错误 ({resp.status}): {text[:200]}"
@@ -775,8 +818,8 @@ class Main(Star):
         final_url = f"{base}/models/{model}:generateContent"
         
         # 构建请求 - 添加分辨率设置
-        resolution_map = {"1K": "1024x1024", "2K": "2048x2048", "4K": "4096x4096"}
-        target_size = resolution_map.get(resolution, "4096x4096")
+        use_image_config = self.config.get("gemini_use_image_config", True)
+        aspect_ratio = self.config.get("generic_aspect_ratio", "自动")
         
         if images:
             final_prompt = f"Re-imagine the attached image: {prompt}. Draw it directly. Output high quality {resolution} resolution image."
@@ -793,17 +836,19 @@ class Main(Star):
                 }
             })
         
-        # 构建生成配置 - 包含图片尺寸设置
+        # 构建生成配置 - 可选imageConfig/旧版aspectRatio
         generation_config = {
             "maxOutputTokens": 8192,
-            "responseModalities": ["image", "text"],
-            "imageConfig": {
-                "imageSize": resolution  # "1K", "2K", "4K"
-            }
+            "responseModalities": ["image", "text"]
         }
+        if use_image_config:
+            generation_config["imageConfig"] = {"imageSize": resolution}
+        else:
+            if not images and aspect_ratio and aspect_ratio != "自动":
+                generation_config["aspectRatio"] = aspect_ratio
         
         if self.config.get("debug_mode", False):
-            logger.info(f"[Gemini] 请求: model={model}, resolution={resolution}, imageSize={resolution}")
+            logger.info(f"[Gemini] 请求: model={model}, resolution={resolution}, use_image_config={use_image_config}")
         
         payload = {
             "contents": [{"parts": parts}],
@@ -822,12 +867,13 @@ class Main(Star):
         }
         
         timeout = self.config.get("timeout", 120)
+        timeout_obj = aiohttp.ClientTimeout(total=timeout)
         proxy = self.config.get("proxy_url") if self.config.get("gemini_use_proxy") else None
         
         try:
             session = await self._get_session()
             async with session.post(final_url, json=payload, headers=headers,
-                                    proxy=proxy, timeout=timeout) as resp:
+                                    proxy=proxy, timeout=timeout_obj) as resp:
                 if resp.status != 200:
                     text = await resp.text()
                     return False, f"API错误 ({resp.status}): {text[:200]}"
@@ -870,6 +916,9 @@ class Main(Star):
         non_retryable = ["未配置", "API Key", "配置错误", "权限", "Unauthorized", "Forbidden", "Invalid"]
         
         last_error = "未知错误"
+
+        if images:
+            images = await self._maybe_compress_images(images)
         
         for attempt in range(max_retries):
             if mode == "flow":
@@ -1535,10 +1584,11 @@ g = Gemini (仅白名单, 4K输出)
             yield event.plain_result(mode_err)
             return
         
-        # 群次数检查（LLM工具统一使用群统计）
-        if group_id:  # 群聊使用群统计
+        # 次数检查（按配置选择群统计或个人统计）
+        use_group_limit = self.config.get("llm_tool_use_group_limit", True)
+        if use_group_limit and group_id:
             ok, limit_msg = limit_manager.check_and_consume_group(group_id, self.config)
-        else:  # 私聊回退到个人统计
+        else:
             ok, limit_msg = limit_manager.check_and_consume(user_id, None, self.config)
         
         if not ok:

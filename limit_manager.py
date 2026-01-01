@@ -37,8 +37,11 @@ def _init_db():
     # 确保目录存在
     os.makedirs(os.path.dirname(db_file), exist_ok=True)
     
-    conn = sqlite3.connect(db_file)
+    conn = sqlite3.connect(db_file, timeout=5)
     c = conn.cursor()
+    
+    # 提升并发容忍度
+    c.execute("PRAGMA journal_mode=WAL;")
     
     # 个人次数统计表
     c.execute('''CREATE TABLE IF NOT EXISTS usage_stats
@@ -56,7 +59,7 @@ def _init_db():
 def _get_connection():
     """获取数据库连接"""
     _init_db()
-    return sqlite3.connect(_get_db_file())
+    return sqlite3.connect(_get_db_file(), timeout=5)
 
 
 def _parse_list(raw_list):
