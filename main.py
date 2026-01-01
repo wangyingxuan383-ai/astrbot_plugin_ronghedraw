@@ -370,14 +370,28 @@ class Main(Star):
             logger.warning(f"图片压缩失败: {e}")
             return data
 
-    async def _maybe_compress_images(self, images: List[bytes]) -> List[bytes]:
+    async def _maybe_compress_images(self, images: List[bytes], mode: str) -> List[bytes]:
         """异步压缩大图，避免阻塞事件循环"""
         if not images or PILImage is None:
             return images
+        if mode == "flow":
+            max_size = 4096
+            size_threshold = 6 * 1024 * 1024
+        else:
+            max_size = 2048
+            size_threshold = 2 * 1024 * 1024
         result = []
         for img in images:
             try:
-                result.append(await asyncio.to_thread(self._compress_image, img))
+                result.append(
+                    await asyncio.to_thread(
+                        self._compress_image,
+                        img,
+                        max_size,
+                        85,
+                        size_threshold,
+                    )
+                )
             except Exception:
                 result.append(img)
         return result
@@ -918,7 +932,7 @@ class Main(Star):
         last_error = "未知错误"
 
         if images:
-            images = await self._maybe_compress_images(images)
+            images = await self._maybe_compress_images(images, mode)
         
         for attempt in range(max_retries):
             if mode == "flow":
