@@ -398,7 +398,7 @@ class Main(Star):
             except Exception:
                 result.append(img)
         return result
-    
+
     def _clean_prompt(self, raw_text: str, event) -> str:
         """清理提示词，移除@用户信息（昵称和QQ号）"""
         text = raw_text
@@ -1244,7 +1244,6 @@ class Main(Star):
         """默认模式文生图"""
         user_id = event.get_sender_id()
         group_id = event.get_group_id()
-        cache_key = self._get_llm_cache_key(event)
         mode = self._get_effective_mode(None, user_id, group_id)
         async for result in self._handle_text2img(event, mode):
             yield result
@@ -1805,7 +1804,8 @@ g = Gemini (仅白名单, 4K输出)
         
         user_id = event.get_sender_id()
         group_id = event.get_group_id()
-        
+        cache_key = self._get_llm_cache_key(event)
+
         # 统一使用llm_default_mode（不区分白名单/普通用户）
         mode = self.config.get("llm_default_mode", "generic")
         
