@@ -255,6 +255,18 @@
         },
         "default": []
     },
+    "llm_last_image_ttl": {
+        "description": "【LLM】上一次图片缓存TTL(秒)",
+        "type": "int",
+        "hint": "LLM工具使用上一次图片的缓存时间。0表示不过期。",
+        "default": 3600
+    },
+    "llm_last_image_max_entries": {
+        "description": "【LLM】上一次图片缓存最大条数",
+        "type": "int",
+        "hint": "限制LLM上一次图片缓存数量，避免内存占用过大。",
+        "default": 100
+    },
     "enable_auto_recall": {
         "description": "【撤回】启用自动撤回",
         "type": "bool",
@@ -327,6 +339,6 @@
         "description": "【帮助】帮助文本",
         "type": "text",
         "editor_mode": true,
-        "default": "🎨 RongheDraw 绘图插件\n\n━━ 快速开始 ━━\n#f文生图 <描述>  文字生成图片\n#f图生图 [图片]  图片风格转换\n#f手办化 [图片]  手办化效果\n\n━━ API模式 ━━\nf = Flow (支持翻译，所有用户可用)\no = Generic (仅白名单)\ng = Gemini (仅白名单)\n\n示例: #o文 <描述>  #g图 [图片]\n\n━━ 权限 ━━\n普通用户: 仅 #f 命令\n白名单: 所有模式\n\n━━ 其他 ━━\n#查询次数 | #lm列表 | #f切换模型"
+        "default": "🎨 RongheDraw 绘图插件\n\n━━ 快速开始 ━━\n#f文生图 <描述>  文字生成图片\n#f图生图 [图片]  图片风格转换\n#f手办化 [图片]  手办化效果\n\n━━ API模式 ━━\nf = Flow (支持翻译，所有用户可用)\no = Generic (仅白名单)\ng = Gemini (仅白名单)\n\n示例: #o文 <描述>  #g图 [图片]\n\n━━ 权限 ━━\n普通用户: 仅 #f 命令\n白名单: 所有模式\n\n━━ 其他 ━━\n#查询次数 | #预设列表\n#生图菜单 | #生图帮助\n#切换到 f/o/g\n#f切换模型 | #f翻译开关"
     }
 }

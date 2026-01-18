@@ -2,7 +2,7 @@
 RongheDraw 多模式绘图插件
 支持 Flow/Generic/Gemini 三种 API 模式
 作者: Antigravity
-版本: 1.2.0
+版本: 1.2.1
 """
 import asyncio
 import base64
@@ -39,7 +39,7 @@ from . import limit_manager
     "astrbot_plugin_ronghedraw",
     "Antigravity",
     "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini 三种 API 模式",
-    "1.2.0",
+    "1.2.1",
     "https://github.com/wangyingxuan383-ai/astrbot_plugin_ronghedraw",
 )
 class Main(Star):
@@ -88,6 +88,9 @@ class Main(Star):
         
         # 跟踪pending的asyncio任务
         self.pending_tasks = set()
+
+        # LLM工具“上一次图片”缓存（按会话）
+        self.llm_last_image_cache: Dict[str, Dict[str, Any]] = {}
         
         # 检查依赖
         self._check_dependencies()
@@ -546,16 +549,28 @@ class Main(Star):
                     text = await resp.text()
                     return False, f"API错误 ({resp.status}): {text[:200]}"
                 
-                # 解析流式响应
+                # 解析流式响应（兼容SSE分片）
                 full_content = ""
                 found_url = None
-                async for line in resp.content:
-                    line = line.decode().strip()
-                    if line.startswith("data: ") and line != "data: [DONE]":
+                buffer = ""
+                done = False
+                async for chunk in resp.content.iter_chunked(1024):
+                    if not chunk:
+                        continue
+                    buffer += chunk.decode("utf-8", errors="ignore")
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        line = line.strip()
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            done = True
+                            break
                         try:
-                            chunk = json.loads(line[6:])
-                            if "choices" in chunk and chunk["choices"]:
-                                delta = chunk["choices"][0].get("delta", {})
+                            chunk_json = json.loads(data)
+                            if "choices" in chunk_json and chunk_json["choices"]:
+                                delta = chunk_json["choices"][0].get("delta", {})
                                 if "content" in delta:
                                     full_content += delta["content"]
                                     if "http" in full_content:
@@ -564,7 +579,9 @@ class Main(Star):
                                             found_url = url_match.group(0).rstrip(".,;:!?)")
                                             break
                         except Exception:
-                            pass
+                            continue
+                    if found_url or done:
+                        break
                 
                 # 提取图片URL
                 img_url = found_url
@@ -586,13 +603,13 @@ class Main(Star):
         except Exception as e:
             return False, f"请求异常: {e}"
     
-    async def _call_generic_api(self, images: List[bytes], prompt: str) -> Tuple[bool, Any]:
+    async def _call_generic_api(self, images: List[bytes], prompt: str, resolution_override: str | None = None) -> Tuple[bool, Any]:
         """调用Generic API (支持OpenAI格式和Gemini原生格式)"""
         api_url = self.config.get("generic_api_url", "")
         api_key = await self._get_api_key("generic")
         model = self.config.get("generic_default_model", "nano-banana")
         api_format = self.config.get("generic_api_format", "openai")
-        resolution = self.config.get("generic_resolution", "1K")
+        resolution = resolution_override or self.config.get("generic_resolution", "1K")
         aspect_ratio = self.config.get("generic_aspect_ratio", "自动")
         
         if not api_url or not api_key:
@@ -762,6 +779,7 @@ class Main(Star):
         }
         
         timeout = self.config.get("timeout", 120)
+        timeout_obj = aiohttp.ClientTimeout(total=timeout)
         proxy = self.config.get("proxy_url") if self.config.get("generic_use_proxy") else None
         
         if self.config.get("debug_mode", False):
@@ -816,12 +834,12 @@ class Main(Star):
         except Exception as e:
             return False, f"请求异常: {e}"
     
-    async def _call_gemini_api(self, images: List[bytes], prompt: str) -> Tuple[bool, Any]:
+    async def _call_gemini_api(self, images: List[bytes], prompt: str, resolution_override: str | None = None) -> Tuple[bool, Any]:
         """调用Gemini官方API（支持4K分辨率）"""
         base_url = self.config.get("gemini_api_url", "https://generativelanguage.googleapis.com")
         api_key = await self._get_api_key("gemini")
         model = self.config.get("gemini_default_model", "gemini-2.5-flash-preview-image")
-        resolution = self.config.get("gemini_resolution", "4K")
+        resolution = resolution_override or self.config.get("gemini_resolution", "4K")
         
         if not api_key:
             return False, "Gemini API Key 未配置"
@@ -921,7 +939,7 @@ class Main(Star):
         except Exception as e:
             return False, f"请求异常: {e}"
     
-    async def generate(self, mode: str, images: List[bytes], prompt: str) -> Tuple[bool, Any]:
+    async def generate(self, mode: str, images: List[bytes], prompt: str, resolution: str | None = None) -> Tuple[bool, Any]:
         """统一生成入口（带重试机制，指数退避）"""
         max_retries = self.config.get("max_retries", 3)
         base_delay = self.config.get("retry_delay", 2)
@@ -938,9 +956,9 @@ class Main(Star):
             if mode == "flow":
                 success, result = await self._call_flow_api(images, prompt)
             elif mode == "gemini":
-                success, result = await self._call_gemini_api(images, prompt)
+                success, result = await self._call_gemini_api(images, prompt, resolution)
             else:
-                success, result = await self._call_generic_api(images, prompt)
+                success, result = await self._call_generic_api(images, prompt, resolution)
             
             if success:
                 if self.config.get("debug_mode", False):
@@ -986,6 +1004,23 @@ class Main(Star):
         result = event.plain_result(text)
         # 注：实际撤回需要平台支持，这里只是预留接口
         return result
+
+    def _extract_message_id_from_obj(self, obj: Any) -> Any:
+        """从不同对象中提取message_id"""
+        if obj is None:
+            return None
+        if isinstance(obj, dict):
+            for key in ("message_id", "messageId", "msg_id", "id"):
+                val = obj.get(key)
+                if val:
+                    return val
+            return None
+        for key in ("message_id", "messageId", "msg_id", "id"):
+            if hasattr(obj, key):
+                val = getattr(obj, key)
+                if val:
+                    return val
+        return None
     
     # ================== 命令处理 ==================
     
@@ -998,6 +1033,30 @@ class Main(Star):
         elif cmd.startswith("g"):
             return "gemini", cmd[1:]
         return None, cmd  # 无前缀
+
+    def _parse_mode_token(self, token: str | None) -> str | None:
+        """解析模式参数"""
+        if not token:
+            return None
+        text = str(token).strip().lower()
+        mapping = {
+            "f": "flow",
+            "flow": "flow",
+            "f模式": "flow",
+            "flow模式": "flow",
+            "o": "generic",
+            "generic": "generic",
+            "gen": "generic",
+            "o模式": "generic",
+            "generic模式": "generic",
+            "通用": "generic",
+            "通用模式": "generic",
+            "g": "gemini",
+            "gemini": "gemini",
+            "g模式": "gemini",
+            "gemini模式": "gemini",
+        }
+        return mapping.get(text)
     
     def _get_effective_mode(self, requested_mode: str | None, user_id: str, group_id: str) -> str:
         """获取实际使用的模式"""
@@ -1048,6 +1107,117 @@ class Main(Star):
             return False, f"❌ {current_name} 模式当前不可用\n💡 可用模式: {', '.join(available_names)}"
         
         return True, ""
+
+    def _normalize_resolution(self, resolution: str | None) -> str | None:
+        """标准化分辨率参数"""
+        if resolution is None:
+            return None
+        text = str(resolution).strip().upper()
+        if not text:
+            return None
+        if text in {"1K", "2K", "4K"}:
+            return text
+        return None
+
+    def _get_llm_cache_key(self, event: AstrMessageEvent) -> str:
+        """获取LLM图片缓存Key（会话粒度）"""
+        platform = event.get_platform_name() if hasattr(event, "get_platform_name") else ""
+        group_id = event.get_group_id() if hasattr(event, "get_group_id") else None
+        user_id = event.get_sender_id() if hasattr(event, "get_sender_id") else None
+        if group_id and user_id:
+            return f"{platform}:group:{group_id}:user:{user_id}"
+        if user_id:
+            return f"{platform}:user:{user_id}"
+        unified = getattr(event, "unified_msg_origin", None)
+        if unified:
+            return str(unified)
+        if group_id:
+            return f"{platform}:group:{group_id}"
+        return platform or "default"
+
+    def _get_llm_cache_ttl(self) -> int:
+        """获取LLM图片缓存TTL（秒）"""
+        ttl = self.config.get("llm_last_image_ttl", 3600)
+        try:
+            ttl = int(ttl)
+        except Exception:
+            ttl = 3600
+        return max(0, ttl)
+
+    def _get_llm_cache_max_entries(self) -> int:
+        """获取LLM图片缓存最大条数"""
+        limit = self.config.get("llm_last_image_max_entries", 100)
+        try:
+            limit = int(limit)
+        except Exception:
+            limit = 100
+        return max(0, limit)
+
+    def _prune_llm_cache(self):
+        """清理过期或超限的LLM图片缓存"""
+        if not self.llm_last_image_cache:
+            return
+        now = time.time()
+        ttl = self._get_llm_cache_ttl()
+        if ttl > 0:
+            for key, entry in list(self.llm_last_image_cache.items()):
+                ts = entry.get("ts", 0)
+                if now - ts > ttl:
+                    self.llm_last_image_cache.pop(key, None)
+
+        max_entries = self._get_llm_cache_max_entries()
+        if max_entries > 0 and len(self.llm_last_image_cache) > max_entries:
+            items = sorted(
+                self.llm_last_image_cache.items(),
+                key=lambda kv: kv[1].get("ts", 0)
+            )
+            for key, _ in items[: max(0, len(items) - max_entries)]:
+                self.llm_last_image_cache.pop(key, None)
+
+    def _set_llm_last_image(self, cache_key: str, image_bytes: bytes):
+        """写入LLM“上一次图片”缓存"""
+        if not cache_key or not image_bytes:
+            return
+        self._prune_llm_cache()
+        self.llm_last_image_cache[cache_key] = {
+            "image": image_bytes,
+            "ts": time.time(),
+        }
+        self._prune_llm_cache()
+
+    def _get_llm_last_image(self, cache_key: str) -> bytes | None:
+        """读取LLM“上一次图片”缓存"""
+        if not cache_key:
+            return None
+        self._prune_llm_cache()
+        entry = self.llm_last_image_cache.get(cache_key)
+        if not entry:
+            return None
+        ttl = self._get_llm_cache_ttl()
+        if ttl > 0 and time.time() - entry.get("ts", 0) > ttl:
+            self.llm_last_image_cache.pop(cache_key, None)
+            return None
+        entry["ts"] = time.time()
+        return entry.get("image")
+
+    def _is_followup_request(self, event: AstrMessageEvent, prompt: str) -> bool:
+        """判断是否为“继续修改/沿用上一张”意图"""
+        parts = [prompt or ""]
+        if hasattr(event, "get_message_str"):
+            parts.append(event.get_message_str() or "")
+        text = " ".join(parts).strip()
+        if not text:
+            return False
+        text_lower = text.lower()
+        keywords = [
+            "继续", "接着", "再改", "改一下", "修改", "调整", "优化",
+            "上次", "上一张", "上一幅", "上一个", "刚才", "同上",
+            "继续这张", "继续这个", "在此基础", "基于上次", "基于上一张",
+            "沿用", "参考上次", "参考上一张",
+            "refine", "revise", "modify", "tweak", "iterate",
+            "previous", "last one", "same image",
+        ]
+        return any(k in text_lower or k in text for k in keywords)
     
     # ================== 文生图命令 ==================
     
@@ -1074,6 +1244,7 @@ class Main(Star):
         """默认模式文生图"""
         user_id = event.get_sender_id()
         group_id = event.get_group_id()
+        cache_key = self._get_llm_cache_key(event)
         mode = self._get_effective_mode(None, user_id, group_id)
         async for result in self._handle_text2img(event, mode):
             yield result
@@ -1437,6 +1608,33 @@ class Main(Star):
         self.config["flow_enable_translate"] = not current
         status = "开启" if not current else "关闭"
         yield event.plain_result(f"🌐 翻译功能已{status}")
+
+    @filter.command("切换到", alias={"切换默认", "切换默认模式"})
+    async def cmd_switch_default_modes(self, event: AstrMessageEvent):
+        """切换默认模式（白名单/普通用户/LLM工具）"""
+        raw = event.get_message_str().strip()
+        target = re.sub(r"^切换到\s*", "", raw, flags=re.IGNORECASE).strip()
+        if not target:
+            yield event.plain_result("用法: #切换到 f/o/g")
+            return
+        target = target.split()[0]
+
+        mode = self._parse_mode_token(target)
+        if not mode:
+            yield event.plain_result("无效模式，请输入 f/o/g 或 flow/generic/gemini")
+            return
+
+        enabled, mode_err = self._check_mode_enabled(mode)
+        if not enabled:
+            yield event.plain_result(mode_err)
+            return
+
+        self.config["llm_default_mode"] = mode
+        self.config["normal_user_default_mode"] = mode
+        self.config["default_mode"] = mode
+
+        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini"}[mode]
+        yield event.plain_result(f"✅ 已切换默认模式为 {mode_name}（白名单/普通用户/LLM）")
     
     @filter.command("预设列表")
     async def cmd_list_presets(self, event: AstrMessageEvent):
@@ -1460,7 +1658,7 @@ class Main(Star):
     @filter.command("生图菜单")
     async def cmd_menu(self, event: AstrMessageEvent):
         """显示菜单"""
-        menu = """🎨 RongheDraw 绘图插件 v1.0.0
+        menu = """🎨 RongheDraw 绘图插件 v1.2.1
 
 ━━━━ 📌 快速开始 ━━━━
 #f文 <描述>      文字生成图片
@@ -1487,7 +1685,13 @@ g = Gemini (仅白名单, 4K输出)
 ━━━━ 🔧 管理 ━━━━
 #查询次数 | #预设列表
 #生图菜单 | #生图帮助
-#f切换模型 | #f翻译开关"""
+#切换到 f/o/g
+#f切换模型 | #f翻译开关
+
+━━━━ 🤖 LLM提示 ━━━━
+继续改图: 说“继续修改/基于上次”
+分辨率: resolution=1K/2K/4K (仅Generic/Gemini)
+限制: 提示词<900, 图片<=10"""
         yield event.plain_result(menu)
     
     # ================== 随机预设命令 ==================
@@ -1552,36 +1756,49 @@ g = Gemini (仅白名单, 4K输出)
         event: AstrMessageEvent,
         prompt: str,
         use_message_images: bool = False,
-        image_urls: Optional[List[str]] = None
+        image_urls: Optional[List[str]] = None,
+        use_last_image: Optional[bool] = None,
+        resolution: Optional[str] = None
     ):
         '''
-        生成图片。prompt为画面描述，可优化用户原话。
+        绘图工具：根据用户要求生成图片。
         
-        获取参考图的两种方式（二选一）：
-        1. use_message_images=true：自动获取用户消息中的图片（推荐，支持QQ群聊图片）
-        2. image_urls：手动传入图片URL列表（仅支持公网可访问的URL，不支持gchat.qpic.cn）
+        调用时机：
+        - 仅当用户明确要求“画图/改图/画某人/修改头像”等时调用。
+        - 对连续相似请求先确认，再调用。
         
-        重要提示：
-        - 如果用户发送了图片并希望对图片进行处理，设置use_message_images=true
-        - gchat.qpic.cn是QQ临时链接，无法直接下载，请使用use_message_images代替
-        - 如需使用用户头像，请调用get_avatar获取URL后传入image_urls
+        使用流程：
+        1) 画群友/改图：先调用 get_avatar(user_id) 获取头像URL（不要发给用户），再调用 generate_image(prompt, image_urls=[URL])。
+        2) 纯场景/文生图：直接调用 generate_image(prompt)。
+        3) 用户已发图：优先 use_message_images=true（支持QQ群聊图片）。
+        4) 继续改图：在没有新图时设置 use_last_image=true，使用本会话上一张生成图（若缓存过期则无效）。
+        5) 多人同框：将多个头像URL放入 image_urls 列表。
         
-        调用成功后图片会自动发送给用户，可以用自然语言评论。
+        重要注意：
+        - 图片生成后系统会自动发送，不要发送链接或URL。
+        - gchat.qpic.cn 等临时链接不可用，优先 use_message_images。
+        - 使用头像时，prompt 不要描述人物外貌/性别，除非用户明确要求。
+        - 未明确要求画人/头像时不要调用 get_avatar。
+        - 自动沿用上一张仅在检测到“继续修改”语义且缓存存在时触发。
+        - 图片最多10张，提示词需少于900字符。
+        - resolution 可选 1K/2K/4K，仅对 Generic/Gemini 生效。
         
         Args:
             prompt (string): 画面描述
             use_message_images (boolean, optional): 是否自动获取用户消息中的图片（默认false），推荐设为true
             image_urls (array[string], optional): 参考图URL列表（仅限公网URL，不支持gchat.qpic.cn）
+            use_last_image (boolean, optional): 是否使用本会话上一张生成图（默认false/未指定）
+            resolution (string, optional): 输出分辨率（仅对Generic/Gemini有效，支持1K/2K/4K）
         '''
         if not self.config.get("enable_llm_tool", False):
             yield event.plain_result("LLM 绘图工具未启用")
             return
         
         # 输入验证
-        if len(prompt) > 1000:
-            yield event.plain_result("提示词过长（最大1000字符）")
+        if len(prompt) >= 900:
+            yield event.plain_result("提示词过长（需少于900字符）")
             return
-        
+
         if image_urls and len(image_urls) > 10:
             yield event.plain_result("图片数量过多（最大10张）")
             return
@@ -1597,6 +1814,14 @@ g = Gemini (仅白名单, 4K输出)
         if not enabled:
             yield event.plain_result(mode_err)
             return
+
+        # 分辨率参数（仅Generic/Gemini有效）
+        resolution_override = self._normalize_resolution(resolution)
+        if resolution and not resolution_override:
+            yield event.plain_result("分辨率仅支持 1K/2K/4K")
+            return
+        if resolution_override and mode == "flow":
+            resolution_override = None
         
         # 次数检查（按配置选择群统计或个人统计）
         use_group_limit = self.config.get("llm_tool_use_group_limit", True)
@@ -1617,6 +1842,9 @@ g = Gemini (仅白名单, 4K输出)
             images = await self.get_images(event)
             if self.config.get("debug_mode", False):
                 logger.info(f"[LLM Tool] 从消息中获取了 {len(images)} 张图片")
+            if len(images) > 10:
+                yield event.plain_result("图片数量过多（最大10张）")
+                return
         
         # 方式2: 从AI提供的URL列表下载图片（仅支持公网URL）
         if image_urls and not images:  # 只有在use_message_images未获取到图片时才使用URL
@@ -1641,19 +1869,36 @@ g = Gemini (仅白名单, 4K输出)
             if skipped_qq_urls and not images:
                 yield event.plain_result("无法使用QQ群聊图片，请使用头像URL或其他可访问的图片链接")
                 return
+            if len(images) > 10:
+                yield event.plain_result("图片数量过多（最大10张）")
+                return
         
         # 清理提示词中的@用户信息
         clean_prompt = self._clean_prompt(prompt, event)
-        
+
+        # 处理“上一次图片”缓存（仅在未提供图片时）
+        if not images:
+            cached = self._get_llm_last_image(cache_key)
+            if use_last_image is True:
+                if cached:
+                    images = [cached]
+                else:
+                    yield event.plain_result("没有可用的上一张图片，请发送或回复图片")
+                    return
+            elif use_last_image is None and cached:
+                if self._is_followup_request(event, clean_prompt):
+                    images = [cached]
+
         # 静默处理无效URL
         
         
         start = time.time()
-        success, result = await self.generate(mode, images, clean_prompt)
+        success, result = await self.generate(mode, images, clean_prompt, resolution_override)
         elapsed = time.time() - start
         
         if success:
             # 成功：仅发送图片给用户，不发送状态消息
+            self._set_llm_last_image(cache_key, result)
             yield event.chain_result([self._create_image_from_bytes(result)])
         else:
             # 失败：发送简短错误信息
@@ -1664,13 +1909,14 @@ g = Gemini (仅白名单, 4K输出)
     @filter.llm_tool(name="get_avatar")
     async def llm_tool_get_avatar(self, event: AstrMessageEvent, user_id: str):
         '''
-        获取QQ头像URL。返回URL字符串供generate_image使用。
+        获取QQ头像URL，供 generate_image 使用。
+        仅在明确要画群友/头像/改头像时调用，不要把URL发送给用户。
         
         重要提示:
         1. 必须使用真实的QQ号，不要编造或猜测
-        2. 如需获取群成员的QQ号，请先调用get_group_members_info工具获取群成员列表
-        3. 从消息中的[At:xxx]格式可以直接提取被@用户的QQ号（xxx即为QQ号）
-        4. 从get_group_members_info返回的user_id字段获取成员QQ号
+        2. 如需获取群成员QQ号，请先调用 get_group_members_info 工具获取群成员列表
+        3. 从消息中的[At:xxx]格式可直接提取被@用户的QQ号（xxx即为QQ号）
+        4. 从 get_group_members_info 返回的 user_id 字段获取成员QQ号
         
         Args:
             user_id (string): 真实的QQ号（必须是数字）
@@ -1709,8 +1955,29 @@ g = Gemini (仅白名单, 4K输出)
             # 如果没有图片（纯文本消息），延迟后撤回
             if not has_image:
                 delay = self.config.get("auto_recall_delay", 15)
-                message_id = event.message_obj.message_id if hasattr(event.message_obj, 'message_id') else None
-                
+                message_id = self._extract_message_id_from_obj(ctx)
+
+                if not message_id and hasattr(event, "get_extra"):
+                    for key in ("message_id", "sent_message_id", "msg_id", "messageId", "result", "send_result"):
+                        value = event.get_extra(key)
+                        message_id = self._extract_message_id_from_obj(value)
+                        if not message_id and isinstance(value, (str, int)):
+                            message_id = value
+                        if message_id:
+                            break
+
+                if not message_id:
+                    message_id = self._extract_message_id_from_obj(result)
+
+                if not message_id:
+                    msg_obj = getattr(event, "message_obj", None)
+                    candidate = self._extract_message_id_from_obj(msg_obj)
+                    if candidate:
+                        sender_id = getattr(getattr(msg_obj, "sender", None), "user_id", None)
+                        self_id = event.get_self_id() if hasattr(event, "get_self_id") else None
+                        if sender_id and self_id and str(sender_id) == str(self_id):
+                            message_id = candidate
+
                 if message_id and hasattr(event, 'bot'):
                     if self.config.get("debug_mode", False):
                         logger.info(f"[AutoRecall] 将在 {delay}s 后撤回消息 {message_id}")
@@ -1734,6 +2001,8 @@ g = Gemini (仅白名单, 4K输出)
                     task = asyncio.create_task(delayed_recall())
                     self.pending_tasks.add(task)
                     task.add_done_callback(self.pending_tasks.discard)
+                elif self.config.get("debug_mode", False):
+                    logger.warning("[AutoRecall] 未能获取已发送消息的message_id，跳过撤回")
         except Exception as e:
             if self.config.get("debug_mode", False):
                 logger.warning(f"[AutoRecall] 钩子执行出错: {e}")
