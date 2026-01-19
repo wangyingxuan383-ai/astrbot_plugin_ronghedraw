@@ -2,7 +2,7 @@
 RongheDraw 多模式绘图插件
 支持 Flow/Generic/Gemini 三种 API 模式
 作者: Antigravity
-版本: 1.2.1
+版本: 1.2.3
 """
 import asyncio
 import base64
@@ -27,6 +27,10 @@ from astrbot import logger
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star, register
 from astrbot.core.message.components import At, Image, Reply, Plain
+try:
+    from astrbot.core.message.message_event_result import MessageChain
+except Exception:
+    MessageChain = None
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 try:
     from astrbot.core.utils.io import download_image_by_url
@@ -39,7 +43,7 @@ from . import limit_manager
     "astrbot_plugin_ronghedraw",
     "Antigravity",
     "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini 三种 API 模式",
-    "1.2.1",
+    "1.2.3",
     "https://github.com/wangyingxuan383-ai/astrbot_plugin_ronghedraw",
 )
 class Main(Star):
@@ -998,6 +1002,70 @@ class Main(Star):
                 await event.bot.recall_message(message_id)
         except Exception as e:
             logger.debug(f"撤回失败: {e}")
+
+    async def _delayed_recall(self, bot: Any, message_id: Any, delay: int):
+        """延迟撤回消息（OneBot优先）"""
+        await asyncio.sleep(delay)
+        try:
+            if isinstance(message_id, (str, int)) and str(message_id).isdigit():
+                message_id = int(message_id)
+            if hasattr(bot, "recall_message"):
+                await bot.recall_message(message_id)
+            elif hasattr(bot, "delete_msg"):
+                await bot.delete_msg(message_id=message_id)
+        except Exception as e:
+            if self.config.get("debug_mode", False):
+                logger.warning(f"[AutoRecall] 撤回失败: {e}")
+
+    async def _send_chain_with_recall(self, event: AstrMessageEvent, chain: List[Any]) -> bool:
+        """按OneBot方式发送并创建撤回任务，成功则返回True"""
+        if not self.config.get("enable_auto_recall", False):
+            return False
+        delay = self.config.get("auto_recall_delay", 15)
+        if not delay:
+            return False
+
+        bot = getattr(event, "bot", None)
+        if bot is None or MessageChain is None or not hasattr(event, "_parse_onebot_json"):
+            return False
+
+        group_id = event.get_group_id()
+        user_id = event.get_sender_id()
+        if not group_id and not user_id:
+            return False
+
+        try:
+            obmsg = await event._parse_onebot_json(MessageChain(chain=chain))
+        except Exception as e:
+            if self.config.get("debug_mode", False):
+                logger.warning(f"[AutoRecall] 解析OneBot消息失败: {e}")
+            return False
+
+        try:
+            result = None
+            if group_id and hasattr(bot, "send_group_msg"):
+                result = await bot.send_group_msg(group_id=int(group_id), message=obmsg)
+            elif user_id and hasattr(bot, "send_private_msg"):
+                result = await bot.send_private_msg(user_id=int(user_id), message=obmsg)
+            else:
+                return False
+        except Exception as e:
+            if self.config.get("debug_mode", False):
+                logger.warning(f"[AutoRecall] 发送消息失败: {e}")
+            return False
+
+        message_id = self._extract_message_id_from_obj(result)
+        if not message_id:
+            if self.config.get("debug_mode", False):
+                logger.warning("[AutoRecall] 未获取到message_id，无法撤回")
+            return False
+
+        task = asyncio.create_task(self._delayed_recall(bot, message_id, delay))
+        self.pending_tasks.add(task)
+        task.add_done_callback(self.pending_tasks.discard)
+        if self.config.get("debug_mode", False):
+            logger.info(f"[AutoRecall] 已创建撤回任务，{delay}s 后撤回 {message_id}")
+        return True
     
     async def _send_and_recall(self, event: AstrMessageEvent, text: str):
         """发送消息并计划撤回"""
@@ -1014,12 +1082,25 @@ class Main(Star):
                 val = obj.get(key)
                 if val:
                     return val
+            data = obj.get("data")
+            if isinstance(data, dict):
+                for key in ("message_id", "messageId", "msg_id", "id"):
+                    val = data.get(key)
+                    if val:
+                        return val
             return None
         for key in ("message_id", "messageId", "msg_id", "id"):
             if hasattr(obj, key):
                 val = getattr(obj, key)
                 if val:
                     return val
+        if hasattr(obj, "data"):
+            data = getattr(obj, "data")
+            if isinstance(data, dict):
+                for key in ("message_id", "messageId", "msg_id", "id"):
+                    val = data.get(key)
+                    if val:
+                        return val
         return None
     
     # ================== 命令处理 ==================
@@ -1298,10 +1379,13 @@ class Main(Star):
             elapsed = time.time() - start
             
             if success:
-                yield event.chain_result([
+                chain = [
                     self._create_image_from_bytes(result),
                     Plain(f"✅ [{mode_name}] 生成成功 ({elapsed:.1f}s) | {limit_msg}")
-                ])
+                ]
+                if await self._send_chain_with_recall(event, chain):
+                    return
+                yield event.chain_result(chain)
             else:
                 yield event.plain_result(f"❌ [{mode_name}] 生成失败 ({elapsed:.1f}s)\n原因: {result}")
         
@@ -1397,10 +1481,13 @@ class Main(Star):
             elapsed = time.time() - start
             
             if success:
-                yield event.chain_result([
+                chain = [
                     self._create_image_from_bytes(result),
                     Plain(f"✅ [{mode_name}] 生成成功 ({elapsed:.1f}s) | {limit_msg}")
-                ])
+                ]
+                if await self._send_chain_with_recall(event, chain):
+                    return
+                yield event.chain_result(chain)
             else:
                 yield event.plain_result(f"❌ [{mode_name}] 生成失败 ({elapsed:.1f}s)\n原因: {result}")
         
@@ -1558,10 +1645,13 @@ class Main(Star):
             elapsed = time.time() - start
             
             if success:
-                yield event.chain_result([
+                chain = [
                     self._create_image_from_bytes(result),
                     Plain(f"✅ [{mode_name}] {preset_name}成功 ({elapsed:.1f}s) | {limit_msg}")
-                ])
+                ]
+                if await self._send_chain_with_recall(event, chain):
+                    return
+                yield event.chain_result(chain)
             else:
                 yield event.plain_result(f"❌ [{mode_name}] {preset_name}失败 ({elapsed:.1f}s)\n原因: {result}")
         
@@ -1904,7 +1994,10 @@ g = Gemini (仅白名单, 4K输出)
         if success:
             # 成功：仅发送图片给用户，不发送状态消息
             self._set_llm_last_image(cache_key, result)
-            yield event.chain_result([self._create_image_from_bytes(result)])
+            chain = [self._create_image_from_bytes(result)]
+            if await self._send_chain_with_recall(event, chain):
+                return
+            yield event.chain_result(chain)
         else:
             # 失败：发送简短错误信息
             yield event.plain_result("生成失败")
@@ -1950,64 +2043,56 @@ g = Gemini (仅白名单, 4K输出)
             if not result or not hasattr(result, 'chain'):
                 return
             
-            # 检查消息链中是否包含图片
-            has_image = False
-            for comp in result.chain:
-                if isinstance(comp, Image):
-                    has_image = True
-                    break
-            
-            # 如果没有图片（纯文本消息），延迟后撤回
-            if not has_image:
-                delay = self.config.get("auto_recall_delay", 15)
-                message_id = self._extract_message_id_from_obj(ctx)
+            # 统一尝试撤回（不区分是否包含图片）
+            delay = self.config.get("auto_recall_delay", 15)
+            message_id = self._extract_message_id_from_obj(ctx)
 
-                if not message_id and hasattr(event, "get_extra"):
-                    for key in ("message_id", "sent_message_id", "msg_id", "messageId", "result", "send_result"):
-                        value = event.get_extra(key)
-                        message_id = self._extract_message_id_from_obj(value)
-                        if not message_id and isinstance(value, (str, int)):
-                            message_id = value
-                        if message_id:
-                            break
+            if not message_id and hasattr(event, "get_extra"):
+                for key in ("message_id", "sent_message_id", "msg_id", "messageId", "result", "send_result"):
+                    value = event.get_extra(key)
+                    message_id = self._extract_message_id_from_obj(value)
+                    if not message_id and isinstance(value, (str, int)):
+                        message_id = value
+                    if message_id:
+                        break
 
-                if not message_id:
-                    message_id = self._extract_message_id_from_obj(result)
+            if not message_id:
+                message_id = self._extract_message_id_from_obj(result)
 
-                if not message_id:
-                    msg_obj = getattr(event, "message_obj", None)
-                    candidate = self._extract_message_id_from_obj(msg_obj)
-                    if candidate:
-                        sender_id = getattr(getattr(msg_obj, "sender", None), "user_id", None)
-                        self_id = event.get_self_id() if hasattr(event, "get_self_id") else None
-                        if sender_id and self_id and str(sender_id) == str(self_id):
-                            message_id = candidate
+            if not message_id:
+                msg_obj = getattr(event, "message_obj", None)
+                candidate = self._extract_message_id_from_obj(msg_obj)
+                if candidate:
+                    sender_id = getattr(getattr(msg_obj, "sender", None), "user_id", None)
+                    self_id = event.get_self_id() if hasattr(event, "get_self_id") else None
+                    if sender_id and self_id and str(sender_id) == str(self_id):
+                        message_id = candidate
 
-                if message_id and hasattr(event, 'bot'):
-                    if self.config.get("debug_mode", False):
-                        logger.info(f"[AutoRecall] 将在 {delay}s 后撤回消息 {message_id}")
-                    
-                    async def delayed_recall():
-                        await asyncio.sleep(delay)
-                        try:
-                            # 尝试调用平台的撤回方法
-                            if hasattr(event.bot, 'recall_message'):
-                                await event.bot.recall_message(message_id)
-                                if self.config.get("debug_mode", False):
-                                    logger.info(f"[AutoRecall] 已撤回消息 {message_id}")
-                            elif hasattr(event.bot, 'delete_msg'):
-                                await event.bot.delete_msg(message_id=message_id)
-                                if self.config.get("debug_mode", False):
-                                    logger.info(f"[AutoRecall] 已删除消息 {message_id}")
-                        except Exception as e:
+            if message_id and hasattr(event, 'bot'):
+                if self.config.get("debug_mode", False):
+                    logger.info(f"[AutoRecall] 将在 {delay}s 后撤回消息 {message_id}")
+                
+                async def delayed_recall():
+                    await asyncio.sleep(delay)
+                    try:
+                        # 尝试调用平台的撤回方法
+                        if hasattr(event.bot, 'recall_message'):
+                            await event.bot.recall_message(message_id)
                             if self.config.get("debug_mode", False):
-                                logger.warning(f"[AutoRecall] 撤回失败: {e}")
-                    
-                    task = asyncio.create_task(delayed_recall())
-                    self.pending_tasks.add(task)
-                    task.add_done_callback(self.pending_tasks.discard)
-                elif self.config.get("debug_mode", False):
-                    logger.warning("[AutoRecall] 未能获取已发送消息的message_id，跳过撤回")
+                                logger.info(f"[AutoRecall] 已撤回消息 {message_id}")
+                        elif hasattr(event.bot, 'delete_msg'):
+                            await event.bot.delete_msg(message_id=message_id)
+                            if self.config.get("debug_mode", False):
+                                logger.info(f"[AutoRecall] 已删除消息 {message_id}")
+                    except Exception as e:
+                        if self.config.get("debug_mode", False):
+                            logger.warning(f"[AutoRecall] 撤回失败: {e}")
+                
+                task = asyncio.create_task(delayed_recall())
+                self.pending_tasks.add(task)
+                task.add_done_callback(self.pending_tasks.discard)
+            elif self.config.get("debug_mode", False):
+                logger.warning("[AutoRecall] 未能获取已发送消息的message_id，跳过撤回")
         except Exception as e:
             if self.config.get("debug_mode", False):
                 logger.warning(f"[AutoRecall] 钩子执行出错: {e}")

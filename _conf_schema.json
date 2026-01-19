@@ -270,7 +270,7 @@
     "enable_auto_recall": {
         "description": "【撤回】启用自动撤回",
         "type": "bool",
-        "hint": "开启后，非图片消息（提示、报错等）会自动撤回。",
+        "hint": "开启后，本插件发送的消息会自动撤回（是否成功取决于平台）。",
         "default": false
     },
     "auto_recall_delay": {
