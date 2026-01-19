@@ -1762,32 +1762,37 @@ g = Gemini (仅白名单, 4K输出)
         '''
         绘图工具：根据用户要求生成图片。
         
-        调用时机：
+        何时调用：
         - 仅当用户明确要求“画图/改图/画某人/修改头像”等时调用。
-        - 对连续相似请求先确认，再调用。
+        - 若用户需求不清晰或连续相似请求，请先确认再调用。
         
-        使用流程：
-        1) 画群友/改图：先调用 get_avatar(user_id) 获取头像URL（不要发给用户），再调用 generate_image(prompt, image_urls=[URL])。
+        参数选择原则（给AI用）：
+        - 有用户发图：优先设 use_message_images=true，不需要 image_urls。
+        - 有头像/公网参考图：用 image_urls（如先 get_avatar 得到头像URL）。
+        - 继续改上一张：只有用户明确提到“沿用上一张/继续上一张/按上一张修改”等时才可设 use_last_image=true，且必须没有新图。
+        - 想要分辨率：仅用户明确要求时再传 resolution。
+        
+        使用流程示例：
+        1) 画群友/改头像：先调用 get_avatar(user_id) 获取头像URL（不要发给用户），再调用 generate_image(prompt, image_urls=[URL])。
         2) 纯场景/文生图：直接调用 generate_image(prompt)。
-        3) 用户已发图：优先 use_message_images=true（支持QQ群聊图片）。
-        4) 继续改图：在没有新图时设置 use_last_image=true，使用本会话上一张生成图（若缓存过期则无效）。
+        3) 用户已发图：用 generate_image(prompt, use_message_images=true)。
+        4) 继续改图：仅当用户明确要求“参照上一张/继续上一张”时，用 generate_image(prompt, use_last_image=true)。
         5) 多人同框：将多个头像URL放入 image_urls 列表。
         
         重要注意：
-        - 图片生成后系统会自动发送，不要发送链接或URL。
+        - 图片生成后系统会自动发送，不要发送链接或URL给用户。
         - gchat.qpic.cn 等临时链接不可用，优先 use_message_images。
         - 使用头像时，prompt 不要描述人物外貌/性别，除非用户明确要求。
         - 未明确要求画人/头像时不要调用 get_avatar。
-        - 自动沿用上一张仅在检测到“继续修改”语义且缓存存在时触发。
         - 图片最多10张，提示词需少于900字符。
-        - resolution 可选 1K/2K/4K，仅对 Generic/Gemini 生效。
+        - resolution 仅对 Generic/Gemini 生效，Flow 模式会忽略。
         
         Args:
-            prompt (string): 画面描述
-            use_message_images (boolean, optional): 是否自动获取用户消息中的图片（默认false），推荐设为true
-            image_urls (array[string], optional): 参考图URL列表（仅限公网URL，不支持gchat.qpic.cn）
-            use_last_image (boolean, optional): 是否使用本会话上一张生成图（默认false/未指定）
-            resolution (string, optional): 输出分辨率（仅对Generic/Gemini有效，支持1K/2K/4K）
+            prompt (string): 必填。画面描述或修改要求，尽量具体，长度 < 900 字符。
+            use_message_images (boolean, optional): 当用户消息里有图时设为 true，自动取图（推荐，支持QQ群聊图）。
+            image_urls (array[string], optional): 参考图URL列表（公网稳定URL；不要用 gchat.qpic.cn）。
+            use_last_image (boolean, optional): 仅在用户明确要求“参照上一张/继续上一张”等且没有新图时设为 true。
+            resolution (string, optional): 1K/2K/4K。仅在用户明确要求分辨率/清晰度时传。
         '''
         if not self.config.get("enable_llm_tool", False):
             yield event.plain_result("LLM 绘图工具未启用")
