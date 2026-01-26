@@ -2,5 +2,5 @@ name: astrbot_plugin_ronghedraw
 desc: RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini 三种 API 模式
 description: RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini 三种 API 模式
 author: Antigravity
-version: 1.2.5
+version: 1.2.6
 repo: "https://github.com/wangyingxuan383-ai/astrbot_plugin_ronghedraw"

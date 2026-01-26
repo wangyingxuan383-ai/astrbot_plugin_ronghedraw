@@ -2,7 +2,7 @@
 RongheDraw 多模式绘图插件
 支持 Flow/Generic/Gemini 三种 API 模式
 作者: Antigravity
-版本: 1.2.5
+版本: 1.2.6
 """
 import asyncio
 import base64
@@ -43,7 +43,7 @@ from . import limit_manager
     "astrbot_plugin_ronghedraw",
     "Antigravity",
     "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini 三种 API 模式",
-    "1.2.5",
+    "1.2.6",
     "https://github.com/wangyingxuan383-ai/astrbot_plugin_ronghedraw",
 )
 class Main(Star):
@@ -1927,7 +1927,7 @@ class Main(Star):
     @filter.command("生图菜单")
     async def cmd_menu(self, event: AstrMessageEvent):
         """显示菜单"""
-        menu = """🎨 RongheDraw 绘图插件 v1.2.5
+        menu = """🎨 RongheDraw 绘图插件 v1.2.6
 
 ━━━━ 📌 快速开始 ━━━━
 #f文 <描述>      文字生成图片
@@ -2065,6 +2065,7 @@ Dreamina比例: 配置 dreamina_ratio (自动/固定)
         重要注意：
         - 图片生成后系统会自动发送，不要发送链接或URL给用户。
         - gchat.qpic.cn 等临时链接不可用，优先 use_message_images。
+        - image_urls 支持 dataURL/base64://，可直接传 Base64。
         - 使用头像时，prompt 不要描述人物外貌/性别，除非用户明确要求。
         - 未明确要求画人/头像时不要调用 get_avatar。
         - 图片最多10张，提示词需少于900字符。
@@ -2074,7 +2075,7 @@ Dreamina比例: 配置 dreamina_ratio (自动/固定)
         Args:
             prompt (string): 必填。画面描述或修改要求，尽量具体，长度 < 900 字符。
             use_message_images (boolean, optional): 当用户消息里有图时设为 true，自动取图（推荐，支持QQ群聊图）。
-            image_urls (array[string], optional): 参考图URL列表（公网稳定URL；不要用 gchat.qpic.cn）。
+            image_urls (array[string], optional): 参考图URL列表（公网稳定URL或Base64 dataURL/base64://）。
             use_last_image (boolean, optional): 仅在用户明确要求“参照上一张/继续上一张”等且没有新图时设为 true。
             resolution (string, optional): 1K/2K/4K。仅在用户明确要求分辨率/清晰度时传。
         '''
@@ -2139,6 +2140,11 @@ Dreamina比例: 配置 dreamina_ratio (自动/固定)
         if image_urls and not images:  # 只有在use_message_images未获取到图片时才使用URL
             skipped_qq_urls = []
             for url in image_urls:
+                if url.startswith(("data:", "base64://")):
+                    img_data = await self._load_image_bytes(url)
+                    if img_data:
+                        images.append(img_data)
+                    continue
                 # URL格式检查
                 if not url.startswith(('http://', 'https://')):
                     continue  # 静默跳过无效URL
