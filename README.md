@@ -4,7 +4,7 @@
   <p>支持 Flow/Generic/Gemini/Dreamina 四种 API 模式的 AstrBot 绘图插件</p>
   <p>
     <b>作者:</b> Antigravity &nbsp;|&nbsp;
-    <b>版本:</b> 1.2.7
+    <b>版本:</b> 1.2.8
   </p>
 </div>
 
@@ -20,7 +20,8 @@
 - ⏳ **并发控制**：每模式同时只允许1个非白名单用户生成
 - 🎲 **预设效果**：9个内置预设 + 自定义预设
 - 🤖 **LLM 工具**：让 AI 调用绘图功能
-- 🔁 **默认模式切换**：一键切换无前缀默认模式（白名单/普通用户/LLM）
+- 🔁 **默认模式切换**：支持手动/定时切换无前缀默认模式（白名单/普通用户/LLM）
+- 🛑 **重试可控**：可关闭生成重试，避免无效等待
 - 🧠 **LLM 续画**：支持“上一张图片”缓存继续修改
 - 📏 **LLM 分辨率**：支持 1K/2K/4K 输出控制（Generic/Gemini）
 - 🧾 **LLM 限制**：提示词 < 900 字符、图片 <= 10 张
@@ -148,6 +149,10 @@ Dreamina2api Fork：https://github.com/wangyingxuan383-ai/dreamina2api
 
 ### 其他配置
 - `help_text`: `#生图帮助` 的显示内容（支持自定义）
+- `enable_retry`: 启用/关闭生成重试
+- `max_retries`: 最大重试次数（启用重试时生效）
+- `retry_delay`: 重试基础间隔（指数退避）
+- `default_mode_schedule`: 定时切换默认模式，格式 `HH:MM=模式`（可多条）
 
 ### 代理配置
 - `proxy_url`: 代理地址（默认: http://172.17.0.1:7890）
@@ -227,6 +232,10 @@ AI：好的，继续优化~ [调用 generate_image(prompt="...", use_last_image=
 ---
 
 ## 📜 更新日志
+
+### v1.2.8 (2026-01-26)
+- 新增：`enable_retry` 配置，可主动关闭生成重试
+- 新增：`default_mode_schedule` 定时切换默认模式（支持多条）
 
 ### v1.2.7 (2026-01-26)
 

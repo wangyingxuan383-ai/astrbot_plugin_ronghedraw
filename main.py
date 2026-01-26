@@ -2,7 +2,7 @@
 RongheDraw 多模式绘图插件
 支持 Flow/Generic/Gemini 三种 API 模式
 作者: Antigravity
-版本: 1.2.7
+版本: 1.2.8
 """
 import asyncio
 import base64
@@ -12,7 +12,7 @@ import json
 import random
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -42,8 +42,8 @@ from . import limit_manager
 @register(
     "astrbot_plugin_ronghedraw",
     "Antigravity",
-    "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini 三种 API 模式",
-    "1.2.7",
+    "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini/Dreamina 四种 API 模式",
+    "1.2.8",
     "https://github.com/wangyingxuan383-ai/astrbot_plugin_ronghedraw",
 )
 class Main(Star):
@@ -121,6 +121,93 @@ class Main(Star):
                    self.config.get("gemini_api_url"))
         if not has_api:
             logger.warning("[RongheDraw] WARNING: No API URL configured, plugin functionality limited")
+
+    def _apply_default_mode(self, mode: str, source: str = "manual") -> str:
+        """应用默认模式切换（白名单/普通用户/LLM统一）"""
+        self.config["llm_default_mode"] = mode
+        self.config["normal_user_default_mode"] = mode
+        self.config["default_mode"] = mode
+        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini", "dreamina": "Dreamina"}[mode]
+        if self.config.get("debug_mode", False):
+            logger.info(f"[RongheDraw] 默认模式切换为 {mode_name} ({source})")
+        return mode_name
+
+    def _parse_schedule_item(self, item: str) -> Tuple[int, int, str] | None:
+        """解析定时切换配置项: HH:MM=mode 或 HH:MM mode"""
+        text = str(item).strip()
+        if not text:
+            return None
+        if "=" in text:
+            time_part, mode_part = text.split("=", 1)
+        else:
+            parts = re.split(r"\s+", text, maxsplit=1)
+            if len(parts) < 2:
+                return None
+            time_part, mode_part = parts[0], parts[1]
+
+        time_part = time_part.strip()
+        mode_part = mode_part.strip()
+        if not re.match(r"^\d{1,2}:\d{2}$", time_part):
+            return None
+        hour, minute = map(int, time_part.split(":", 1))
+        if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+            return None
+        mode = self._parse_mode_token(mode_part)
+        if not mode:
+            return None
+        return hour, minute, mode
+
+    def _start_mode_schedule_tasks(self):
+        """启动定时切换默认模式任务"""
+        raw_list = self.config.get("default_mode_schedule", [])
+        if isinstance(raw_list, dict) and "default" in raw_list:
+            raw_list = raw_list["default"]
+        if not isinstance(raw_list, list):
+            raw_list = []
+        if not raw_list:
+            return
+
+        valid = 0
+        for item in raw_list:
+            parsed = self._parse_schedule_item(item)
+            if not parsed:
+                logger.warning(f"[Schedule] 无效配置项: {item}")
+                continue
+            hour, minute, mode = parsed
+            task = asyncio.create_task(self._mode_schedule_loop(hour, minute, mode, str(item)))
+            self.pending_tasks.add(task)
+            task.add_done_callback(self.pending_tasks.discard)
+            valid += 1
+        if valid > 0:
+            logger.info(f"[RongheDraw] 已加载 {valid} 个默认模式定时任务")
+
+    async def _mode_schedule_loop(self, hour: int, minute: int, mode: str, label: str):
+        """定时循环切换默认模式"""
+        while True:
+            now = datetime.now()
+            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if target <= now:
+                target += timedelta(days=1)
+            delay = max(0, (target - now).total_seconds())
+            if self.config.get("debug_mode", False):
+                logger.info(f"[Schedule] {label} 下一次触发: {target.strftime('%Y-%m-%d %H:%M:%S')}")
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+
+            try:
+                enabled, mode_err = self._check_mode_enabled(mode)
+                if not enabled:
+                    logger.warning(f"[Schedule] 目标模式不可用，跳过 ({label}): {mode_err}")
+                else:
+                    mode_name = self._apply_default_mode(mode, source=f"定时 {label}")
+                    logger.info(f"[Schedule] 已切换默认模式为 {mode_name} ({label})")
+            except Exception as e:
+                logger.warning(f"[Schedule] 定时切换失败 ({label}): {e}")
+
+            # 防止极端时间漂移导致的短间隔重复触发
+            await asyncio.sleep(1)
     
     async def initialize(self):
         """插件激活时调用，用于初始化资源"""
@@ -129,6 +216,9 @@ class Main(Star):
         
         # 验证配置
         self._validate_config()
+
+        # 启动定时默认模式切换任务
+        self._start_mode_schedule_tasks()
         
         logger.info('[RongheDraw] 插件已激活，资源已初始化')
     
@@ -1052,8 +1142,15 @@ class Main(Star):
     
     async def generate(self, mode: str, images: List[bytes], prompt: str, resolution: str | None = None) -> Tuple[bool, Any]:
         """统一生成入口（带重试机制，指数退避）"""
+        enable_retry = self.config.get("enable_retry", True)
         max_retries = self.config.get("max_retries", 3)
         base_delay = self.config.get("retry_delay", 2)
+        try:
+            max_retries = int(max_retries)
+        except Exception:
+            max_retries = 3
+        if max_retries < 1:
+            max_retries = 1
         
         # 不可重试的错误关键词（配置错误、权限问题等）
         non_retryable = ["未配置", "API Key", "配置错误", "权限", "Unauthorized", "Forbidden", "Invalid"]
@@ -1062,6 +1159,21 @@ class Main(Star):
 
         if images:
             images = await self._maybe_compress_images(images, mode)
+
+        if not enable_retry:
+            if mode == "flow":
+                success, result = await self._call_flow_api(images, prompt)
+            elif mode == "dreamina":
+                success, result = await self._call_dreamina_api(images, prompt)
+            elif mode == "gemini":
+                success, result = await self._call_gemini_api(images, prompt, resolution)
+            else:
+                success, result = await self._call_generic_api(images, prompt, resolution)
+            if success:
+                if self.config.get("debug_mode", False):
+                    logger.info(f"[{mode}] 生成成功 (单次尝试)")
+                return True, result
+            return False, result
         
         for attempt in range(max_retries):
             if mode == "flow":
@@ -1905,11 +2017,7 @@ class Main(Star):
             yield event.plain_result(mode_err)
             return
 
-        self.config["llm_default_mode"] = mode
-        self.config["normal_user_default_mode"] = mode
-        self.config["default_mode"] = mode
-
-        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini", "dreamina": "Dreamina"}[mode]
+        mode_name = self._apply_default_mode(mode, source="manual")
         yield event.plain_result(f"✅ 已切换默认模式为 {mode_name}（白名单/普通用户/LLM）")
     
     @filter.command("预设列表")
@@ -1934,7 +2042,7 @@ class Main(Star):
     @filter.command("生图菜单")
     async def cmd_menu(self, event: AstrMessageEvent):
         """显示菜单"""
-        menu = """🎨 RongheDraw 绘图插件 v1.2.7
+        menu = """🎨 RongheDraw 绘图插件 v1.2.8
 
 ━━━━ 📌 快速开始 ━━━━
 #f文 <描述>      文字生成图片

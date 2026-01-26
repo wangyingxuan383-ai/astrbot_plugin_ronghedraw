@@ -206,6 +206,15 @@
             "dreamina"
         ]
     },
+    "default_mode_schedule": {
+        "description": "【通用】定时切换默认模式",
+        "type": "list",
+        "hint": "格式: HH:MM=模式 (支持 f/o/g/d 或 flow/generic/gemini/dreamina)。每天该时间自动切换，可多条。",
+        "items": {
+            "type": "string"
+        },
+        "default": []
+    },
     "enable_flow_mode": {
         "description": "【模式开关】启用Flow模式",
         "type": "bool",
@@ -366,10 +375,16 @@
         "type": "int",
         "default": 120
     },
+    "enable_retry": {
+        "description": "【网络】启用生成重试",
+        "type": "bool",
+        "hint": "关闭后只尝试一次，忽略最大重试次数设置。",
+        "default": true
+    },
     "max_retries": {
         "description": "【网络】最大重试次数",
         "type": "int",
-        "hint": "生成失败时的重试次数。设为1则不重试。",
+        "hint": "生成失败时的重试次数（启用重试时生效）。",
         "default": 3
     },
     "retry_delay": {
