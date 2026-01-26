@@ -145,6 +145,43 @@
         "hint": "启用后使用imageConfig设置分辨率（推荐，适配CPA渠道）。关闭则使用aspectRatio方式（旧版官方）。",
         "default": true
     },
+    "dreamina_api_url": {
+        "description": "【Dreamina模式】API地址",
+        "type": "string",
+        "hint": "Dreamina2api 的 images 接口地址。",
+        "default": "http://localhost:5200/v1/images/generations"
+    },
+    "dreamina_api_keys": {
+        "description": "【Dreamina模式】SessionID 列表",
+        "type": "list",
+        "hint": "Dreamina 登录后获取的 sessionid 列表，支持多账号。",
+        "items": {
+            "type": "string"
+        },
+        "default": []
+    },
+    "dreamina_default_model": {
+        "description": "【Dreamina模式】默认模型",
+        "type": "string",
+        "default": "dreamina-4.5"
+    },
+    "dreamina_ratio": {
+        "description": "【Dreamina模式】图片比例",
+        "type": "string",
+        "hint": "自动：根据首张图比例决定；无图时默认1:1。",
+        "default": "自动",
+        "options": [
+            "自动",
+            "1:1",
+            "4:3",
+            "3:4",
+            "16:9",
+            "9:16",
+            "3:2",
+            "2:3",
+            "21:9"
+        ]
+    },
     "default_mode": {
         "description": "【通用】白名单默认API模式",
         "type": "string",
@@ -153,7 +190,8 @@
         "options": [
             "flow",
             "generic",
-            "gemini"
+            "gemini",
+            "dreamina"
         ]
     },
     "normal_user_default_mode": {
@@ -164,7 +202,8 @@
         "options": [
             "flow",
             "generic",
-            "gemini"
+            "gemini",
+            "dreamina"
         ]
     },
     "enable_flow_mode": {
@@ -184,6 +223,12 @@
         "type": "bool",
         "hint": "关闭后，所有g开头的指令和Gemini模式将不可用。",
         "default": true
+    },
+    "enable_dreamina_mode": {
+        "description": "【模式开关】启用Dreamina模式",
+        "type": "bool",
+        "hint": "关闭后，所有d开头的指令和Dreamina模式将不可用。",
+        "default": false
     },
     "daily_limit": {
         "description": "【次数】每日限制次数",
@@ -231,7 +276,8 @@
         "options": [
             "flow",
             "generic",
-            "gemini"
+            "gemini",
+            "dreamina"
         ]
     },
     "llm_tool_use_group_limit": {
@@ -303,6 +349,12 @@
         "hint": "Gemini模式是否使用代理。",
         "default": true
     },
+    "dreamina_use_proxy": {
+        "description": "【Dreamina模式】启用代理",
+        "type": "bool",
+        "hint": "Dreamina模式是否使用代理。",
+        "default": false
+    },
     "proxy_url": {
         "description": "【网络】代理地址",
         "type": "string",
@@ -339,6 +391,6 @@
         "description": "【帮助】帮助文本",
         "type": "text",
         "editor_mode": true,
-        "default": "🎨 RongheDraw 绘图插件\n\n━━ 快速开始 ━━\n#f文 <描述>      文字生成图片\n#f图 [图片]      图片风格转换\n#f随机 [图片]    随机预设效果\n\n━━ API模式 ━━\nf = Flow (自动横竖版，支持翻译)\no = Generic (仅白名单)\ng = Gemini (仅白名单, 4K输出)\n\n示例: #o文 <描述>  #g图 [图片]\n\n━━ 权限 ━━\n普通用户: 仅 #f 命令\n白名单: 所有模式\n\n━━ 管理 ━━\n#查询次数 | #预设列表\n#生图菜单 | #生图帮助\n#切换到 f/o/g\n#f切换模型 | #f翻译开关\n\n━━ LLM提示 ━━\n继续改图: 说“继续修改/基于上次”\n分辨率: resolution=1K/2K/4K (仅Generic/Gemini)\n限制: 提示词<900, 图片<=10\n\n有问题加群：1075544978"
+        "default": "🎨 RongheDraw 绘图插件\n\n━━ 快速开始 ━━\n#f文 <描述>      文字生成图片\n#f图 [图片]      图片风格转换\n#f随机 [图片]    随机预设效果\n\n━━ API模式 ━━\nf = Flow (自动横竖版，支持翻译)\no = Generic (仅白名单)\ng = Gemini (仅白名单, 4K输出)\nd = Dreamina (仅白名单, 比例可配置)\n\n示例: #o文 <描述>  #g图 [图片]  #d文 <描述>\n\n━━ 权限 ━━\n普通用户: 仅 #f 命令\n白名单: 所有模式\n\n━━ 管理 ━━\n#查询次数 | #预设列表\n#生图菜单 | #生图帮助\n#切换到 f/o/g/d\n#f切换模型 | #f翻译开关\n\n━━ LLM提示 ━━\n继续改图: 说“继续修改/基于上次”\n分辨率: resolution=1K/2K/4K (仅Generic/Gemini)\nDreamina比例: 配置 dreamina_ratio (自动/固定)\n限制: 提示词<900, 图片<=10\n\n有问题加群：1075544978"
     }
 }

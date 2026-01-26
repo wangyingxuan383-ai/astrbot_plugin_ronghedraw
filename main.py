@@ -2,7 +2,7 @@
 RongheDraw 多模式绘图插件
 支持 Flow/Generic/Gemini 三种 API 模式
 作者: Antigravity
-版本: 1.2.3
+版本: 1.2.5
 """
 import asyncio
 import base64
@@ -43,7 +43,7 @@ from . import limit_manager
     "astrbot_plugin_ronghedraw",
     "Antigravity",
     "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini 三种 API 模式",
-    "1.2.3",
+    "1.2.5",
     "https://github.com/wangyingxuan383-ai/astrbot_plugin_ronghedraw",
 )
 class Main(Star):
@@ -68,7 +68,8 @@ class Main(Star):
         self.mode_locks = {
             "flow": asyncio.Lock(),
             "generic": asyncio.Lock(),
-            "gemini": asyncio.Lock()
+            "gemini": asyncio.Lock(),
+            "dreamina": asyncio.Lock()
         }
         
         # 加载预设
@@ -464,6 +465,15 @@ class Main(Star):
         async with self.key_lock:
             if mode == "flow":
                 return self.config.get("flow_api_key", "")
+            elif mode == "dreamina":
+                keys = self.config.get("dreamina_api_keys", [])
+                if isinstance(keys, str):
+                    keys = [k.strip() for k in keys.split(",") if k.strip()]
+                elif isinstance(keys, list):
+                    keys = [str(k).strip() for k in keys if str(k).strip()]
+                if not keys:
+                    return None
+                return ",".join(keys)
             elif mode == "gemini":
                 keys = self.config.get("gemini_api_keys", [])
                 if not keys:
@@ -942,6 +952,96 @@ class Main(Star):
             return False, "请求超时"
         except Exception as e:
             return False, f"请求异常: {e}"
+
+    async def _call_dreamina_api(self, images: List[bytes], prompt: str) -> Tuple[bool, Any]:
+        """调用Dreamina API（支持base64图片）"""
+        api_url = self.config.get("dreamina_api_url", "")
+        api_key = await self._get_api_key("dreamina")
+        model = self.config.get("dreamina_default_model", "dreamina-4.5")
+
+        if not api_url or not api_key:
+            return False, "Dreamina API 未配置"
+
+        is_img2img = bool(images)
+        ratio = self._get_dreamina_ratio(images)
+
+        # 选择端点（文生图/图生图）
+        endpoint = api_url
+        if is_img2img:
+            if endpoint.endswith("/generations"):
+                endpoint = endpoint[: -len("/generations")] + "/compositions"
+            elif endpoint.endswith("/v1/images"):
+                endpoint = endpoint + "/compositions"
+            elif endpoint.endswith("/v1/images/"):
+                endpoint = endpoint + "compositions"
+        else:
+            if endpoint.endswith("/compositions"):
+                endpoint = endpoint[: -len("/compositions")] + "/generations"
+            elif endpoint.endswith("/v1/images"):
+                endpoint = endpoint + "/generations"
+            elif endpoint.endswith("/v1/images/"):
+                endpoint = endpoint + "generations"
+
+        payload: Dict[str, Any] = {
+            "model": model,
+            "prompt": prompt,
+            "ratio": ratio,
+            "response_format": "b64_json",
+        }
+        if is_img2img:
+            payload["images"] = [self._bytes_to_base64(img) for img in images]
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        timeout = self.config.get("timeout", 120)
+        timeout_obj = aiohttp.ClientTimeout(total=timeout)
+        proxy = self.config.get("proxy_url") if self.config.get("dreamina_use_proxy") else None
+
+        if self.config.get("debug_mode", False):
+            logger.info(f"[Dreamina] 请求: url={endpoint}, model={model}, ratio={ratio}, images={len(images)}")
+
+        try:
+            session = await self._get_session()
+            async with session.post(
+                endpoint,
+                json=payload,
+                headers=headers,
+                proxy=proxy,
+                timeout=timeout_obj,
+            ) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    return False, f"API错误 ({resp.status}): {text[:200]}"
+
+                data = await resp.json()
+                items = data.get("data", [])
+                if not items:
+                    return False, "API返回空内容"
+
+                # 优先base64
+                b64 = items[0].get("b64_json")
+                if b64:
+                    try:
+                        return True, base64.b64decode(b64)
+                    except Exception:
+                        pass
+
+                # 兼容url格式
+                img_url = items[0].get("url")
+                if img_url:
+                    img_data = await self._download_image(img_url)
+                    if img_data:
+                        return True, img_data
+                    return False, f"图片下载失败: {img_url}"
+
+                return False, "未找到可用图片数据"
+        except asyncio.TimeoutError:
+            return False, "请求超时"
+        except Exception as e:
+            return False, f"请求异常: {e}"
     
     async def generate(self, mode: str, images: List[bytes], prompt: str, resolution: str | None = None) -> Tuple[bool, Any]:
         """统一生成入口（带重试机制，指数退避）"""
@@ -959,6 +1059,8 @@ class Main(Star):
         for attempt in range(max_retries):
             if mode == "flow":
                 success, result = await self._call_flow_api(images, prompt)
+            elif mode == "dreamina":
+                success, result = await self._call_dreamina_api(images, prompt)
             elif mode == "gemini":
                 success, result = await self._call_gemini_api(images, prompt, resolution)
             else:
@@ -1113,6 +1215,8 @@ class Main(Star):
             return "generic", cmd[1:]
         elif cmd.startswith("g"):
             return "gemini", cmd[1:]
+        elif cmd.startswith("d"):
+            return "dreamina", cmd[1:]
         return None, cmd  # 无前缀
 
     def _parse_mode_token(self, token: str | None) -> str | None:
@@ -1136,6 +1240,10 @@ class Main(Star):
             "gemini": "gemini",
             "g模式": "gemini",
             "gemini模式": "gemini",
+            "d": "dreamina",
+            "dreamina": "dreamina",
+            "d模式": "dreamina",
+            "dreamina模式": "dreamina",
         }
         return mapping.get(text)
     
@@ -1163,10 +1271,15 @@ class Main(Star):
         mode_switch = {
             "flow": "enable_flow_mode",
             "generic": "enable_generic_mode",
-            "gemini": "enable_gemini_mode"
+            "gemini": "enable_gemini_mode",
+            "dreamina": "enable_dreamina_mode"
         }
         
-        if not self.config.get(mode_switch[mode], True):
+        enabled = self.config.get(mode_switch[mode], True)
+        if mode == "dreamina" and mode_switch[mode] not in self.config:
+            enabled = False
+
+        if not enabled:
             # 找出当前可用的模式
             available = []
             for m, switch in mode_switch.items():
@@ -1179,7 +1292,8 @@ class Main(Star):
             mode_names = {
                 "flow": "Flow (f)",
                 "generic": "Generic (o)",
-                "gemini": "Gemini (g)"
+                "gemini": "Gemini (g)",
+                "dreamina": "Dreamina (d)"
             }
             
             current_name = mode_names[mode]
@@ -1199,6 +1313,55 @@ class Main(Star):
         if text in {"1K", "2K", "4K"}:
             return text
         return None
+
+    def _get_dreamina_ratio(self, images: List[bytes]) -> str:
+        """获取Dreamina比例（自动或固定比例）"""
+        ratio = self.config.get("dreamina_ratio", "自动")
+        ratio_text = str(ratio).strip()
+        if not ratio_text:
+            ratio_text = "自动"
+
+        # 允许中英文自动标记
+        if ratio_text.lower() in {"auto", "自动"}:
+            if images and PILImage is not None:
+                try:
+                    img = PILImage.open(io.BytesIO(images[0]))
+                    width, height = img.size
+                    if height and width:
+                        return self._match_dreamina_ratio(width, height)
+                except Exception:
+                    pass
+            return "1:1"
+
+        # 固定比例
+        supported = {
+            "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "21:9"
+        }
+        if ratio_text in supported:
+            return ratio_text
+
+        logger.warning(f"[Dreamina] 不支持的比例: {ratio_text}, 回退到 1:1")
+        return "1:1"
+
+    def _match_dreamina_ratio(self, width: int, height: int) -> str:
+        """根据宽高匹配Dreamina标准比例"""
+        aspect = width / height if height else 1.0
+        ratio_map = {
+            "1:1": 1.0,
+            "4:3": 4 / 3,
+            "3:4": 3 / 4,
+            "16:9": 16 / 9,
+            "9:16": 9 / 16,
+            "3:2": 3 / 2,
+            "2:3": 2 / 3,
+            "21:9": 21 / 9,
+        }
+        # 优先匹配接近比例
+        for key, val in ratio_map.items():
+            if abs(aspect - val) < 0.1:
+                return key
+        # 否则选最接近的
+        return min(ratio_map.keys(), key=lambda k: abs(aspect - ratio_map[k]))
 
     def _get_llm_cache_key(self, event: AstrMessageEvent) -> str:
         """获取LLM图片缓存Key（会话粒度）"""
@@ -1319,6 +1482,12 @@ class Main(Star):
         """Gemini模式文生图"""
         async for result in self._handle_text2img(event, "gemini"):
             yield result
+
+    @filter.command("d文", alias={"d文生图"})
+    async def cmd_dreamina_text2img(self, event: AstrMessageEvent):
+        """Dreamina模式文生图"""
+        async for result in self._handle_text2img(event, "dreamina"):
+            yield result
     
     @filter.command("文生图", alias={"文"})
     async def cmd_default_text2img(self, event: AstrMessageEvent):
@@ -1348,7 +1517,7 @@ class Main(Star):
         
         # 提取提示词并清理@用户信息
         raw = event.get_message_str().strip()
-        prompt = re.sub(r'^[fog]?文(生图)?\s*', '', raw, flags=re.IGNORECASE).strip()
+        prompt = re.sub(r'^[fogd]?文(生图)?\s*', '', raw, flags=re.IGNORECASE).strip()
         prompt = self._clean_prompt(prompt, event)
         
         if not prompt:
@@ -1361,7 +1530,7 @@ class Main(Star):
             yield event.plain_result(f"❌ {limit_msg}")
             return
         
-        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini"}[actual_mode]
+        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini", "dreamina": "Dreamina"}[actual_mode]
         
         # 并发控制 - 白名单用户不受限制
         is_whitelisted = limit_manager.is_user_whitelisted(user_id, self.config)
@@ -1416,6 +1585,12 @@ class Main(Star):
         """Gemini模式图生图"""
         async for result in self._handle_img2img(event, "gemini"):
             yield result
+
+    @filter.command("d图", alias={"d图生图"})
+    async def cmd_dreamina_img2img(self, event: AstrMessageEvent):
+        """Dreamina模式图生图"""
+        async for result in self._handle_img2img(event, "dreamina"):
+            yield result
     
     @filter.command("图生图", alias={"图"})
     async def cmd_default_img2img(self, event: AstrMessageEvent):
@@ -1445,7 +1620,7 @@ class Main(Star):
         
         # 提取提示词并清理@用户信息
         raw = event.get_message_str().strip()
-        prompt = re.sub(r'^[fog]?图(生图)?\s*', '', raw, flags=re.IGNORECASE).strip()
+        prompt = re.sub(r'^[fogd]?图(生图)?\s*', '', raw, flags=re.IGNORECASE).strip()
         prompt = self._clean_prompt(prompt, event)
         
         if not prompt:
@@ -1463,7 +1638,7 @@ class Main(Star):
             yield event.plain_result(f"❌ {limit_msg}")
             return
         
-        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini"}[actual_mode]
+        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini", "dreamina": "Dreamina"}[actual_mode]
         
         # 并发控制 - 白名单用户不受限制
         is_whitelisted = limit_manager.is_user_whitelisted(user_id, self.config)
@@ -1527,17 +1702,17 @@ class Main(Star):
         
         raw_cmd = tokens[0].strip()
         
-        # 解析命令前缀 (f/o/g) 和基础命令
+        # 解析命令前缀 (f/o/g/d) 和基础命令
         prefix_mode = None
         base_cmd = raw_cmd
         
         if len(raw_cmd) > 1:
             first_char = raw_cmd[0].lower()
-            if first_char in ('f', 'o', 'g'):
+            if first_char in ('f', 'o', 'g', 'd'):
                 # 检查去掉前缀后的命令是否在自定义预设中
                 potential_cmd = raw_cmd[1:]
                 if potential_cmd in self.prompt_map:
-                    prefix_mode = {"f": "flow", "o": "generic", "g": "gemini"}.get(first_char)
+                    prefix_mode = {"f": "flow", "o": "generic", "g": "gemini", "d": "dreamina"}.get(first_char)
                     base_cmd = potential_cmd
         
         # 检查是否匹配自定义预设（排除已硬编码的内置预设命令）
@@ -1581,6 +1756,11 @@ class Main(Star):
     @filter.command("g手办化")
     async def cmd_gemini_figurine(self, event: AstrMessageEvent):
         async for r in self._handle_preset(event, "gemini", "手办化"):
+            yield r
+
+    @filter.command("d手办化")
+    async def cmd_dreamina_figurine(self, event: AstrMessageEvent):
+        async for r in self._handle_preset(event, "dreamina", "手办化"):
             yield r
     
     @filter.command("手办化")
@@ -1627,7 +1807,7 @@ class Main(Star):
             yield event.plain_result(f"❌ {limit_msg}")
             return
         
-        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini"}[actual_mode]
+        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini", "dreamina": "Dreamina"}[actual_mode]
         
         # 并发控制 - 白名单用户不受限制
         is_whitelisted = limit_manager.is_user_whitelisted(user_id, self.config)
@@ -1704,7 +1884,7 @@ class Main(Star):
         raw = event.get_message_str().strip()
         target = re.sub(r"^切换到\s*", "", raw, flags=re.IGNORECASE).strip()
         if not target:
-            yield event.plain_result("用法: #切换到 f/o/g")
+            yield event.plain_result("用法: #切换到 f/o/g/d")
             return
         target = target.split()[0]
 
@@ -1722,7 +1902,7 @@ class Main(Star):
         self.config["normal_user_default_mode"] = mode
         self.config["default_mode"] = mode
 
-        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini"}[mode]
+        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini", "dreamina": "Dreamina"}[mode]
         yield event.plain_result(f"✅ 已切换默认模式为 {mode_name}（白名单/普通用户/LLM）")
     
     @filter.command("预设列表")
@@ -1747,7 +1927,7 @@ class Main(Star):
     @filter.command("生图菜单")
     async def cmd_menu(self, event: AstrMessageEvent):
         """显示菜单"""
-        menu = """🎨 RongheDraw 绘图插件 v1.2.1
+        menu = """🎨 RongheDraw 绘图插件 v1.2.5
 
 ━━━━ 📌 快速开始 ━━━━
 #f文 <描述>      文字生成图片
@@ -1758,8 +1938,9 @@ class Main(Star):
 f = Flow (自动横竖版，支持翻译)
 o = Generic (仅白名单)
 g = Gemini (仅白名单, 4K输出)
+d = Dreamina (仅白名单, 比例可配置)
 
-例: #o文 <描述>  #g图 [图片]
+例: #o文 <描述>  #g图 [图片]  #d文 <描述>
 
 ━━━━ ⚙️ 权限/并发 ━━━━
 普通用户: 仅 #f 命令，有并发限制
@@ -1780,6 +1961,7 @@ g = Gemini (仅白名单, 4K输出)
 ━━━━ 🤖 LLM提示 ━━━━
 继续改图: 说“继续修改/基于上次”
 分辨率: resolution=1K/2K/4K (仅Generic/Gemini)
+Dreamina比例: 配置 dreamina_ratio (自动/固定)
 限制: 提示词<900, 图片<=10"""
         yield event.plain_result(menu)
     
@@ -1821,6 +2003,17 @@ g = Gemini (仅白名单, 4K输出)
             return
         preset = random.choice(all_presets)
         async for r in self._handle_preset(event, "gemini", preset):
+            yield r
+
+    @filter.command("d随机")
+    async def cmd_dreamina_random(self, event: AstrMessageEvent):
+        """Dreamina模式随机预设"""
+        all_presets = self._get_all_presets()
+        if not all_presets:
+            yield event.plain_result("❌ 暂无可用预设")
+            return
+        preset = random.choice(all_presets)
+        async for r in self._handle_preset(event, "dreamina", preset):
             yield r
     
     @filter.command("随机", alias={"随机预设"})
@@ -1875,7 +2068,8 @@ g = Gemini (仅白名单, 4K输出)
         - 使用头像时，prompt 不要描述人物外貌/性别，除非用户明确要求。
         - 未明确要求画人/头像时不要调用 get_avatar。
         - 图片最多10张，提示词需少于900字符。
-        - resolution 仅对 Generic/Gemini 生效，Flow 模式会忽略。
+        - Dreamina 使用 ratio 配置控制比例，不支持 resolution 参数。
+        - resolution 仅对 Generic/Gemini 生效，Flow/Dreamina 模式会忽略。
         
         Args:
             prompt (string): 必填。画面描述或修改要求，尽量具体，长度 < 900 字符。
@@ -1915,7 +2109,7 @@ g = Gemini (仅白名单, 4K输出)
         if resolution and not resolution_override:
             yield event.plain_result("分辨率仅支持 1K/2K/4K")
             return
-        if resolution_override and mode == "flow":
+        if resolution_override and mode in ("flow", "dreamina"):
             resolution_override = None
         
         # 次数检查（按配置选择群统计或个人统计）
@@ -2115,4 +2309,3 @@ g = Gemini (仅白名单, 4K输出)
             await self._http_session.close()
         
         logger.info("[RongheDraw] 插件已卸载，资源已清理")
-
