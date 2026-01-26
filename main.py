@@ -2,7 +2,7 @@
 RongheDraw 多模式绘图插件
 支持 Flow/Generic/Gemini 三种 API 模式
 作者: Antigravity
-版本: 1.2.6
+版本: 1.2.7
 """
 import asyncio
 import base64
@@ -43,7 +43,7 @@ from . import limit_manager
     "astrbot_plugin_ronghedraw",
     "Antigravity",
     "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini 三种 API 模式",
-    "1.2.6",
+    "1.2.7",
     "https://github.com/wangyingxuan383-ai/astrbot_plugin_ronghedraw",
 )
 class Main(Star):
@@ -1017,9 +1017,16 @@ class Main(Star):
                     return False, f"API错误 ({resp.status}): {text[:200]}"
 
                 data = await resp.json()
+                if isinstance(data, dict):
+                    if "code" in data and data.get("code") not in (0, None):
+                        return False, f"Dreamina2api错误 ({data.get('code')}): {data.get('message', 'Unknown error')}"
+                    if "errmsg" in data and data.get("errmsg"):
+                        return False, f"Dreamina2api错误: {data.get('errmsg')}"
+                    if "error" in data and data.get("error"):
+                        return False, f"Dreamina2api错误: {data.get('error')}"
                 items = data.get("data", [])
                 if not items:
-                    return False, "API返回空内容"
+                    return False, f"API返回空内容: {str(data)[:200]}"
 
                 # 优先base64
                 b64 = items[0].get("b64_json")
@@ -1927,7 +1934,7 @@ class Main(Star):
     @filter.command("生图菜单")
     async def cmd_menu(self, event: AstrMessageEvent):
         """显示菜单"""
-        menu = """🎨 RongheDraw 绘图插件 v1.2.6
+        menu = """🎨 RongheDraw 绘图插件 v1.2.7
 
 ━━━━ 📌 快速开始 ━━━━
 #f文 <描述>      文字生成图片
