@@ -2,7 +2,7 @@
 RongheDraw 多模式绘图插件
 支持 Flow/Generic/Gemini/Dreamina 四种 API 模式
 作者: Antigravity
-版本: 1.2.10
+版本: 1.2.11
 """
 import asyncio
 import inspect
@@ -49,7 +49,7 @@ from . import limit_manager
     "astrbot_plugin_ronghedraw",
     "Antigravity",
     "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini/Dreamina 四种 API 模式",
-    "1.2.10",
+    "1.2.11",
     "https://github.com/wangyingxuan383-ai/astrbot_plugin_ronghedraw",
 )
 class Main(Star):
@@ -811,7 +811,7 @@ class Main(Star):
                     else:
                         seg_info.append(f"{seg.__class__.__name__}")
                 logger.info(
-                    f\"[get_images] reply_imgs={reply_count} current_imgs={current_count} avatars={avatar_count} total={len(images)} segments={seg_info} raw_segments={len(raw_segments)}\"
+                    f"[get_images] reply_imgs={reply_count} current_imgs={current_count} avatars={avatar_count} total={len(images)} segments={seg_info} raw_segments={len(raw_segments)}"
                 )
             except Exception:
                 pass
@@ -2442,7 +2442,7 @@ class Main(Star):
     @filter.command("生图菜单")
     async def cmd_menu(self, event: AstrMessageEvent):
         """显示菜单"""
-        menu = """🎨 RongheDraw 绘图插件 v1.2.10
+        menu = """🎨 RongheDraw 绘图插件 v1.2.11
 
 ━━━━ 📌 快速开始 ━━━━
 #f文 <描述>      文字生成图片
