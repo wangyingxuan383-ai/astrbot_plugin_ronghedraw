@@ -2,10 +2,11 @@
 RongheDraw 多模式绘图插件
 支持 Flow/Generic/Gemini/Dreamina 四种 API 模式
 作者: Antigravity
-版本: 1.2.9
+版本: 1.2.10
 """
 import asyncio
 import inspect
+import html
 import base64
 import hashlib
 import io
@@ -44,7 +45,7 @@ from . import limit_manager
     "astrbot_plugin_ronghedraw",
     "Antigravity",
     "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini/Dreamina 四种 API 模式",
-    "1.2.9",
+    "1.2.10",
     "https://github.com/wangyingxuan383-ai/astrbot_plugin_ronghedraw",
 )
 class Main(Star):
@@ -380,6 +381,62 @@ class Main(Star):
                             return []
         return []
 
+    def _parse_cq_message(self, text: str) -> List[dict]:
+        """从CQ码文本解析出图片/回复/@段"""
+        segments: List[dict] = []
+        if not text:
+            return segments
+        for m in re.finditer(r"\\[CQ:([a-zA-Z0-9_]+),([^\\]]*)\\]", text):
+            seg_type = m.group(1)
+            data_str = m.group(2)
+            data: dict = {}
+            for part in data_str.split(","):
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    data[k] = html.unescape(v)
+            if seg_type in {"image", "reply", "at"}:
+                segments.append({"type": seg_type, "data": data})
+        return segments
+
+    def _segments_from_raw_message(self, raw: Any) -> List[Any]:
+        """从raw_message中获取segments"""
+        if isinstance(raw, dict):
+            msg = raw.get("message")
+            if isinstance(msg, list):
+                return msg
+            if isinstance(msg, str):
+                return self._parse_cq_message(msg)
+            raw_msg = raw.get("raw_message")
+            if isinstance(raw_msg, str):
+                return self._parse_cq_message(raw_msg)
+        if isinstance(raw, str):
+            return self._parse_cq_message(raw)
+        return []
+
+    def _segment_is_image(self, seg: Any) -> bool:
+        if isinstance(seg, Image):
+            return True
+        if isinstance(seg, dict) and seg.get("type") == "image":
+            return True
+        if hasattr(seg, "type") and getattr(seg, "type") == "image":
+            return True
+        return False
+
+    def _segment_is_reply(self, seg: Any) -> bool:
+        if isinstance(seg, Reply):
+            return True
+        if isinstance(seg, dict) and seg.get("type") == "reply":
+            return True
+        if hasattr(seg, "type") and getattr(seg, "type") == "reply":
+            return True
+        return False
+
+    def _segments_has_image(self, segments: List[Any]) -> bool:
+        return any(self._segment_is_image(seg) for seg in segments)
+
+    def _segments_has_reply(self, segments: List[Any]) -> bool:
+        return any(self._segment_is_reply(seg) for seg in segments)
+
     def _extract_image_sources_from_data(self, data: dict) -> List[str]:
         """从segment data中提取可能的图片来源"""
         if not isinstance(data, dict):
@@ -570,14 +627,18 @@ class Main(Star):
         chain = self._as_segments(getattr(event, "message_obj", None))
         if not chain:
             chain = self._as_segments(getattr(event, "message", None))
+        raw_segments = self._segments_from_raw_message(getattr(getattr(event, "message_obj", None), "raw_message", None))
         if not chain:
             chain = []
         
         # 0. 预扫描：获取回复发送者ID和统计At次数（用于过滤自动@）
         reply_sender_id = None
         at_counts: dict = {}
-        
-        for seg in chain:
+
+        primary_segments = chain if chain else raw_segments
+        fallback_segments = raw_segments if chain else []
+
+        for seg in primary_segments:
             if isinstance(seg, Reply):
                 if hasattr(seg, 'sender_id') and seg.sender_id:
                     reply_sender_id = str(seg.sender_id)
@@ -591,26 +652,44 @@ class Main(Star):
         
         # 1. 回复链/回复消息中的图片
         reply_segments: List[Any] = []
-        for seg in chain:
+        reply_ids: set[str] = set()
+        for seg in primary_segments:
             if isinstance(seg, Reply) and hasattr(seg, 'chain') and seg.chain:
                 reply_segments.extend(list(seg.chain))
                 continue
             reply_id = self._extract_reply_id(seg)
             if reply_id:
-                fetched = await self._fetch_reply_segments(event, reply_id)
-                if fetched:
-                    reply_segments.extend(fetched)
+                reply_ids.add(reply_id)
+        for seg in fallback_segments:
+            reply_id = self._extract_reply_id(seg)
+            if reply_id:
+                reply_ids.add(reply_id)
+        for reply_id in reply_ids:
+            fetched = await self._fetch_reply_segments(event, reply_id)
+            if fetched:
+                reply_segments.extend(fetched)
+        reply_count = 0
         if reply_segments:
-            images.extend(await self._collect_images_from_segments(reply_segments, event))
+            reply_imgs = await self._collect_images_from_segments(reply_segments, event)
+            reply_count = len(reply_imgs)
+            images.extend(reply_imgs)
         
         # 2. 当前消息中的图片
-        if chain:
-            images.extend(await self._collect_images_from_segments(chain, event))
+        current_count = 0
+        if primary_segments and self._segments_has_image(primary_segments):
+            current_imgs = await self._collect_images_from_segments(primary_segments, event)
+            current_count = len(current_imgs)
+            images.extend(current_imgs)
+        elif fallback_segments and self._segments_has_image(fallback_segments):
+            current_imgs = await self._collect_images_from_segments(fallback_segments, event)
+            current_count = len(current_imgs)
+            images.extend(current_imgs)
         
         # 3. @用户头像（带自动过滤逻辑）
         self_id = str(event.get_self_id()).strip() if hasattr(event, 'get_self_id') else ""
         
-        for seg in chain:
+        avatar_count = 0
+        for seg in primary_segments:
             uid = self._extract_at_uid(seg)
             if uid:
                 
@@ -630,17 +709,32 @@ class Main(Star):
                 
                 # 通过过滤，获取头像
                 if avatar := await self._get_avatar(uid):
+                    avatar_count += 1
                     images.append(avatar)
 
-        if not images and self.config.get("debug_mode", False):
+        # 去重（防止重复图片）
+        if images:
+            uniq: List[bytes] = []
+            seen: set[str] = set()
+            for img in images:
+                digest = hashlib.md5(img).hexdigest()
+                if digest in seen:
+                    continue
+                seen.add(digest)
+                uniq.append(img)
+            images = uniq
+
+        if self.config.get("debug_mode", False):
             try:
                 seg_info = []
-                for seg in chain:
+                for seg in primary_segments:
                     if isinstance(seg, dict):
                         seg_info.append(f"dict:{seg.get('type')} keys={list(seg.keys())}")
                     else:
                         seg_info.append(f"{seg.__class__.__name__}")
-                logger.info(f"[get_images] 未获取到图片，segments={seg_info}")
+                logger.info(
+                    f\"[get_images] reply_imgs={reply_count} current_imgs={current_count} avatars={avatar_count} total={len(images)} segments={seg_info} raw_segments={len(raw_segments)}\"
+                )
             except Exception:
                 pass
         
@@ -2270,7 +2364,7 @@ class Main(Star):
     @filter.command("生图菜单")
     async def cmd_menu(self, event: AstrMessageEvent):
         """显示菜单"""
-        menu = """🎨 RongheDraw 绘图插件 v1.2.9
+        menu = """🎨 RongheDraw 绘图插件 v1.2.10
 
 ━━━━ 📌 快速开始 ━━━━
 #f文 <描述>      文字生成图片
