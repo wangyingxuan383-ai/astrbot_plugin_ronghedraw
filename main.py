@@ -38,6 +38,10 @@ try:
     from astrbot.core.utils.io import download_image_by_url
 except ImportError:
     download_image_by_url = None
+try:
+    from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+except Exception:
+    get_astrbot_data_path = None
 from . import limit_manager
 
 
@@ -437,6 +441,60 @@ class Main(Star):
     def _segments_has_reply(self, segments: List[Any]) -> bool:
         return any(self._segment_is_reply(seg) for seg in segments)
 
+    def _normalize_file_url(self, src: str) -> str:
+        """规范化 file:// URL 为本地路径"""
+        if not src:
+            return src
+        if src.startswith("file:"):
+            return re.sub(r"^file:/+", "/", src)
+        return src
+
+    def _history_group_path(self, group_id: str) -> Path | None:
+        if not group_id or not get_astrbot_data_path:
+            return None
+        base = Path(get_astrbot_data_path())
+        path = base / "chat_history" / "aiocqhttp" / "group" / f"{group_id}.json"
+        return path if path.exists() else None
+
+    def _extract_history_image_sources(self, seg: dict) -> List[str]:
+        sources: List[str] = []
+        if not isinstance(seg, dict):
+            return sources
+        # jsonpickle 格式
+        if isinstance(seg.get("py/object"), str) and seg.get("py/object", "").endswith(".Image"):
+            state = seg.get("py/state", {}).get("__dict__", {})
+            sources.extend(self._extract_image_sources_from_data(state))
+            return sources
+        # 普通OneBot格式
+        if seg.get("type") == "image":
+            data = seg.get("data", seg)
+            if isinstance(data, dict):
+                sources.extend(self._extract_image_sources_from_data(data))
+        return sources
+
+    async def _load_reply_images_from_history(self, group_id: str, reply_id: str) -> List[bytes]:
+        """从本地聊天记录读取回复消息图片（兜底）"""
+        path = self._history_group_path(group_id)
+        if not path:
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        target = str(reply_id)
+        for msg in reversed(data):
+            if str(msg.get("message_id")) != target:
+                continue
+            images: List[bytes] = []
+            for seg in msg.get("message", []):
+                for src in self._extract_history_image_sources(seg):
+                    src = self._normalize_file_url(src)
+                    img = await self._load_image_bytes(src)
+                    if img:
+                        images.append(img)
+            return images
+        return []
+
     def _extract_image_sources_from_data(self, data: dict) -> List[str]:
         """从segment data中提取可能的图片来源"""
         if not isinstance(data, dict):
@@ -673,6 +731,14 @@ class Main(Star):
             reply_imgs = await self._collect_images_from_segments(reply_segments, event)
             reply_count = len(reply_imgs)
             images.extend(reply_imgs)
+        # 回复兜底：从本地聊天记录读取
+        if reply_ids and reply_count == 0:
+            group_id = event.get_group_id() if hasattr(event, "get_group_id") else ""
+            for rid in reply_ids:
+                hist_imgs = await self._load_reply_images_from_history(group_id, rid)
+                if hist_imgs:
+                    reply_count += len(hist_imgs)
+                    images.extend(hist_imgs)
         
         # 2. 当前消息中的图片
         current_count = 0
@@ -711,6 +777,18 @@ class Main(Star):
                 if avatar := await self._get_avatar(uid):
                     avatar_count += 1
                     images.append(avatar)
+        # 文本@兜底
+        try:
+            text_ats = re.findall(r'@(\\d+)', event.get_message_str())
+            for uid in text_ats:
+                uid = str(uid).strip()
+                if self_id and uid == self_id:
+                    continue
+                if avatar := await self._get_avatar(uid):
+                    avatar_count += 1
+                    images.append(avatar)
+        except Exception:
+            pass
 
         # 去重（防止重复图片）
         if images:
