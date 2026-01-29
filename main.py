@@ -2,7 +2,7 @@
 RongheDraw 多模式绘图插件
 支持 Flow/Generic/Gemini/Dreamina 四种 API 模式
 作者: Antigravity
-版本: 1.2.12
+版本: 1.2.13
 """
 import asyncio
 import inspect
@@ -49,7 +49,7 @@ from . import limit_manager
     "astrbot_plugin_ronghedraw",
     "Antigravity",
     "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini/Dreamina 四种 API 模式",
-    "1.2.12",
+    "1.2.13",
     "https://github.com/wangyingxuan383-ai/astrbot_plugin_ronghedraw",
 )
 class Main(Star):
@@ -286,8 +286,10 @@ class Main(Star):
                     data = Path(path).read_bytes()
                     if self.config.get("debug_mode", False):
                         logger.info(f"[download_image_by_url] 成功下载: {url[:60]}... (size={len(data)})")
-                    if data:
+                    if data and self._looks_like_image_bytes(data):
                         return data
+                    if self.config.get("debug_mode", False):
+                        logger.warning(f"[download_image_by_url] 非图片内容: {url[:60]}... (size={len(data)})")
             except Exception as e:
                 if self.config.get("debug_mode", False):
                     logger.warning(f"[download_image_by_url] 下载失败: {e}")
@@ -311,8 +313,13 @@ class Main(Star):
                 async with session.get(url, timeout=timeout_obj, headers=headers) as resp:
                     resp.raise_for_status()
                     data = await resp.read()
-                    if data:
+                    content_type = resp.headers.get("Content-Type", "")
+                    if data and (content_type.startswith("image/") or self._looks_like_image_bytes(data)):
                         return data
+                    if self.config.get("debug_mode", False):
+                        logger.warning(
+                            f"下载图片失败: 非图片内容 ({content_type}) {url[:60]}... (size={len(data)})"
+                        )
             except Exception as e:
                 if i < 2:
                     await asyncio.sleep(1)
@@ -342,13 +349,38 @@ class Main(Star):
             return out.getvalue()
         except Exception:
             return raw
+
+    def _looks_like_image_bytes(self, data: bytes) -> bool:
+        """快速判断bytes是否像图片（避免把错误页面当图片）"""
+        if not data or len(data) < 10:
+            return False
+        if data.startswith(b"\xff\xd8\xff"):  # JPEG
+            return True
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):  # PNG
+            return True
+        if data[:6] in (b"GIF87a", b"GIF89a"):  # GIF
+            return True
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":  # WEBP
+            return True
+        if data[:2] == b"BM":  # BMP
+            return True
+        if data[:4] in (b"II*\x00", b"MM\x00*"):  # TIFF
+            return True
+        return False
     
     async def _load_image_bytes(self, src: str) -> bytes | None:
         """从各种来源加载图片"""
         if not src:
             return None
+        src = self._normalize_file_url(src)
         if Path(src).is_file():
-            return Path(src).read_bytes()
+            try:
+                data = Path(src).read_bytes()
+            except Exception:
+                return None
+            if self._looks_like_image_bytes(data):
+                return data
+            return None
         elif src.startswith("http"):
             raw = await self._download_image(src)
             if raw:
@@ -552,7 +584,7 @@ class Main(Star):
         """支持file_id等特殊字段的图片加载"""
         if not src:
             return None
-        s = str(src).strip()
+        s = self._normalize_file_url(str(src).strip())
         if not s:
             return None
         if s.startswith(("http://", "https://", "base64://", "data:")) or Path(s).is_file():
@@ -2454,7 +2486,7 @@ class Main(Star):
     @filter.command("生图菜单")
     async def cmd_menu(self, event: AstrMessageEvent):
         """显示菜单"""
-        menu = """🎨 RongheDraw 绘图插件 v1.2.12
+        menu = """🎨 RongheDraw 绘图插件 v1.2.13
 
 ━━━━ 📌 快速开始 ━━━━
 #f文 <描述>      文字生成图片

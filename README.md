@@ -4,7 +4,7 @@
   <p>支持 Flow/Generic/Gemini/Dreamina 四种 API 模式的 AstrBot 绘图插件</p>
   <p>
     <b>作者:</b> Antigravity &nbsp;|&nbsp;
-    <b>版本:</b> 1.2.12
+    <b>版本:</b> 1.2.13
   </p>
 </div>
 
@@ -232,6 +232,10 @@ AI：好的，继续优化~ [调用 generate_image(prompt="...", use_last_image=
 ---
 
 ## 📜 更新日志
+
+### v1.2.13 (2026-01-29)
+- 修复：QQ 图片下载返回非图片内容时被误当作输入
+- 修复：支持 file:// 本地路径图片读取（适配 get_image 返回）
 
 ### v1.2.12 (2026-01-29)
 - 修复：下载图片为空时的兜底逻辑（补充校验与请求头）
