@@ -2,7 +2,7 @@
 RongheDraw 多模式绘图插件
 支持 Flow/Generic/Gemini/Dreamina 四种 API 模式
 作者: Antigravity
-版本: 1.2.11
+版本: 1.2.12
 """
 import asyncio
 import inspect
@@ -49,7 +49,7 @@ from . import limit_manager
     "astrbot_plugin_ronghedraw",
     "Antigravity",
     "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini/Dreamina 四种 API 模式",
-    "1.2.11",
+    "1.2.12",
     "https://github.com/wangyingxuan383-ai/astrbot_plugin_ronghedraw",
 )
 class Main(Star):
@@ -285,8 +285,9 @@ class Main(Star):
                 if path and Path(path).is_file():
                     data = Path(path).read_bytes()
                     if self.config.get("debug_mode", False):
-                        logger.info(f"[download_image_by_url] 成功下载: {url[:60]}...")
-                    return data
+                        logger.info(f"[download_image_by_url] 成功下载: {url[:60]}... (size={len(data)})")
+                    if data:
+                        return data
             except Exception as e:
                 if self.config.get("debug_mode", False):
                     logger.warning(f"[download_image_by_url] 下载失败: {e}")
@@ -295,12 +296,23 @@ class Main(Star):
         timeout = self.config.get("timeout", 120)
         timeout_obj = aiohttp.ClientTimeout(total=timeout)
         
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        }
+        if "qpic.cn" in url:
+            headers["Referer"] = "https://gchat.qpic.cn/"
+            headers["Origin"] = "https://gchat.qpic.cn"
+
         for i in range(3):
             try:
                 session = await self._get_session()
-                async with session.get(url, timeout=timeout_obj) as resp:
+                async with session.get(url, timeout=timeout_obj, headers=headers) as resp:
                     resp.raise_for_status()
-                    return await resp.read()
+                    data = await resp.read()
+                    if data:
+                        return data
             except Exception as e:
                 if i < 2:
                     await asyncio.sleep(1)
@@ -2442,7 +2454,7 @@ class Main(Star):
     @filter.command("生图菜单")
     async def cmd_menu(self, event: AstrMessageEvent):
         """显示菜单"""
-        menu = """🎨 RongheDraw 绘图插件 v1.2.11
+        menu = """🎨 RongheDraw 绘图插件 v1.2.12
 
 ━━━━ 📌 快速开始 ━━━━
 #f文 <描述>      文字生成图片
