@@ -1,10 +1,11 @@
 """
 RongheDraw 多模式绘图插件
-支持 Flow/Generic/Gemini 三种 API 模式
+支持 Flow/Generic/Gemini/Dreamina 四种 API 模式
 作者: Antigravity
-版本: 1.2.8
+版本: 1.2.9
 """
 import asyncio
+import inspect
 import base64
 import hashlib
 import io
@@ -43,7 +44,7 @@ from . import limit_manager
     "astrbot_plugin_ronghedraw",
     "Antigravity",
     "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini/Dreamina 四种 API 模式",
-    "1.2.8",
+    "1.2.9",
     "https://github.com/wangyingxuan383-ai/astrbot_plugin_ronghedraw",
 )
 class Main(Star):
@@ -327,6 +328,8 @@ class Main(Star):
     
     async def _load_image_bytes(self, src: str) -> bytes | None:
         """从各种来源加载图片"""
+        if not src:
+            return None
         if Path(src).is_file():
             return Path(src).read_bytes()
         elif src.startswith("http"):
@@ -346,6 +349,217 @@ class Main(Star):
             except Exception:
                 pass
         return None
+
+    def _as_segments(self, obj: Any) -> List[Any]:
+        """尽量将消息对象解析为segment列表"""
+        if obj is None:
+            return []
+        if isinstance(obj, list):
+            return obj
+        if isinstance(obj, tuple):
+            return list(obj)
+        for attr in ("message", "chain"):
+            if hasattr(obj, attr):
+                try:
+                    return list(getattr(obj, attr) or [])
+                except Exception:
+                    pass
+        try:
+            return list(obj)
+        except Exception:
+            pass
+        if isinstance(obj, dict):
+            data = obj.get("data", obj)
+            if isinstance(data, dict):
+                for key in ("message", "messages", "message_chain", "chain"):
+                    if key in data:
+                        val = data[key]
+                        try:
+                            return list(val) if not isinstance(val, str) else []
+                        except Exception:
+                            return []
+        return []
+
+    def _extract_image_sources_from_data(self, data: dict) -> List[str]:
+        """从segment data中提取可能的图片来源"""
+        if not isinstance(data, dict):
+            return []
+        sources: List[str] = []
+        for key in ("url", "file", "path", "src", "image", "file_id", "id"):
+            val = data.get(key)
+            if isinstance(val, str) and val.strip():
+                sources.append(val.strip())
+        for key in ("base64", "b64"):
+            val = data.get(key)
+            if isinstance(val, str) and val.strip():
+                v = val.strip()
+                if v.startswith("data:") or v.startswith("base64://"):
+                    sources.append(v)
+                else:
+                    sources.append("base64://" + v)
+        return sources
+
+    async def _call_bot_method(self, bot: Any, name: str, **kwargs) -> Any:
+        """安全调用bot方法（兼容同步/异步）"""
+        func = getattr(bot, name, None)
+        if not func:
+            return None
+        try:
+            result = func(**kwargs)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        except TypeError:
+            pass
+        except Exception:
+            return None
+        try:
+            result = func(*list(kwargs.values()))
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        except Exception:
+            return None
+
+    async def _load_image_bytes_with_event(self, src: str, event: AstrMessageEvent | None) -> bytes | None:
+        """支持file_id等特殊字段的图片加载"""
+        if not src:
+            return None
+        s = str(src).strip()
+        if not s:
+            return None
+        if s.startswith(("http://", "https://", "base64://", "data:")) or Path(s).is_file():
+            return await self._load_image_bytes(s)
+        if re.fullmatch(r"[A-Za-z0-9+/=]+", s or "") and len(s) > 200:
+            try:
+                return base64.b64decode(s)
+            except Exception:
+                pass
+        bot = getattr(event, "bot", None) if event else None
+        if bot and hasattr(bot, "get_image"):
+            resp = await self._call_bot_method(bot, "get_image", file=s)
+            if resp is None:
+                resp = await self._call_bot_method(bot, "get_image", file_id=s)
+            if isinstance(resp, dict):
+                data = resp.get("data", resp)
+                if isinstance(data, dict):
+                    for source in self._extract_image_sources_from_data(data):
+                        if source == s:
+                            continue
+                        img = await self._load_image_bytes(source)
+                        if img:
+                            return img
+        return None
+
+    async def _collect_images_from_segments(self, segments: List[Any], event: AstrMessageEvent) -> List[bytes]:
+        """从segment列表中提取所有图片bytes"""
+        images: List[bytes] = []
+        for seg in segments:
+            if isinstance(seg, Image):
+                sources: List[str] = []
+                if getattr(seg, "url", None):
+                    sources.append(seg.url)
+                if getattr(seg, "file", None):
+                    sources.append(seg.file)
+                if getattr(seg, "base64", None):
+                    try:
+                        images.append(base64.b64decode(seg.base64))
+                        continue
+                    except Exception:
+                        pass
+                if hasattr(seg, "data") and isinstance(seg.data, dict):
+                    sources.extend(self._extract_image_sources_from_data(seg.data))
+                for src in sources:
+                    img = await self._load_image_bytes_with_event(src, event)
+                    if img:
+                        images.append(img)
+                continue
+            if isinstance(seg, dict):
+                seg_type = seg.get("type")
+                if seg_type == "image":
+                    data = seg.get("data", seg)
+                    if isinstance(data, dict) and "base64" in data:
+                        try:
+                            images.append(base64.b64decode(data["base64"]))
+                            continue
+                        except Exception:
+                            pass
+                    sources = self._extract_image_sources_from_data(data if isinstance(data, dict) else {})
+                    for src in sources:
+                        img = await self._load_image_bytes_with_event(src, event)
+                        if img:
+                            images.append(img)
+                    continue
+            if hasattr(seg, "type") and getattr(seg, "type") == "image":
+                data = getattr(seg, "data", None)
+                sources = self._extract_image_sources_from_data(data if isinstance(data, dict) else {})
+                for src in sources:
+                    img = await self._load_image_bytes_with_event(src, event)
+                    if img:
+                        images.append(img)
+        return images
+
+    def _extract_reply_id(self, seg: Any) -> str | None:
+        """提取reply消息ID"""
+        if isinstance(seg, Reply):
+            for key in ("id", "message_id", "msg_id"):
+                val = getattr(seg, key, None)
+                if val:
+                    return str(val)
+        if isinstance(seg, dict) and seg.get("type") == "reply":
+            data = seg.get("data", seg)
+            if isinstance(data, dict):
+                for key in ("id", "message_id", "msg_id"):
+                    if data.get(key):
+                        return str(data.get(key))
+        if hasattr(seg, "type") and getattr(seg, "type") == "reply":
+            data = getattr(seg, "data", None)
+            if isinstance(data, dict):
+                for key in ("id", "message_id", "msg_id"):
+                    if data.get(key):
+                        return str(data.get(key))
+            for key in ("id", "message_id", "msg_id"):
+                val = getattr(seg, key, None)
+                if val:
+                    return str(val)
+        return None
+
+    def _extract_at_uid(self, seg: Any) -> str | None:
+        """提取@用户ID"""
+        if isinstance(seg, At) and hasattr(seg, "qq") and seg.qq != "all":
+            return str(seg.qq)
+        if isinstance(seg, dict) and seg.get("type") == "at":
+            data = seg.get("data", seg)
+            if isinstance(data, dict):
+                uid = data.get("qq") or data.get("user_id") or data.get("id")
+                if uid and uid != "all":
+                    return str(uid)
+        if hasattr(seg, "type") and getattr(seg, "type") == "at":
+            data = getattr(seg, "data", None)
+            if isinstance(data, dict):
+                uid = data.get("qq") or data.get("user_id") or data.get("id")
+                if uid and uid != "all":
+                    return str(uid)
+            if hasattr(seg, "qq") and getattr(seg, "qq") != "all":
+                return str(getattr(seg, "qq"))
+        return None
+
+    async def _fetch_reply_segments(self, event: AstrMessageEvent, reply_id: str) -> List[Any]:
+        """通过reply_id拉取消息内容"""
+        bot = getattr(event, "bot", None)
+        if not bot or not reply_id:
+            return []
+        for method in ("get_msg", "get_message"):
+            resp = await self._call_bot_method(bot, method, message_id=reply_id)
+            if resp is None:
+                resp = await self._call_bot_method(bot, method, id=reply_id)
+            if resp is None:
+                resp = await self._call_bot_method(bot, method, msg_id=reply_id)
+            if resp is not None:
+                segments = self._as_segments(resp)
+                if segments:
+                    return segments
+        return []
     
     async def get_images(self, event: AstrMessageEvent) -> List[bytes]:
         """
@@ -353,7 +567,11 @@ class Main(Star):
         参照gemini_image_ref实现At自动过滤：过滤触发机器人的@和回复自动@
         """
         images: List[bytes] = []
-        chain = event.message_obj.message
+        chain = self._as_segments(getattr(event, "message_obj", None))
+        if not chain:
+            chain = self._as_segments(getattr(event, "message", None))
+        if not chain:
+            chain = []
         
         # 0. 预扫描：获取回复发送者ID和统计At次数（用于过滤自动@）
         reply_sender_id = None
@@ -363,40 +581,38 @@ class Main(Star):
             if isinstance(seg, Reply):
                 if hasattr(seg, 'sender_id') and seg.sender_id:
                     reply_sender_id = str(seg.sender_id)
-            elif isinstance(seg, At):
-                if hasattr(seg, 'qq') and seg.qq != "all":
-                    uid = str(seg.qq)
-                    at_counts[uid] = at_counts.get(uid, 0) + 1
+            elif isinstance(seg, dict) and seg.get("type") == "reply":
+                data = seg.get("data", seg)
+                if isinstance(data, dict) and data.get("sender_id"):
+                    reply_sender_id = str(data.get("sender_id"))
+            uid = self._extract_at_uid(seg)
+            if uid:
+                at_counts[uid] = at_counts.get(uid, 0) + 1
         
-        # 1. 回复链中的图片
+        # 1. 回复链/回复消息中的图片
+        reply_segments: List[Any] = []
         for seg in chain:
             if isinstance(seg, Reply) and hasattr(seg, 'chain') and seg.chain:
-                for s in seg.chain:
-                    if isinstance(s, Image):
-                        if s.url and (img := await self._load_image_bytes(s.url)):
-                            images.append(img)
-                        elif hasattr(s, 'file') and s.file and (img := await self._load_image_bytes(s.file)):
-                            images.append(img)
+                reply_segments.extend(list(seg.chain))
+                continue
+            reply_id = self._extract_reply_id(seg)
+            if reply_id:
+                fetched = await self._fetch_reply_segments(event, reply_id)
+                if fetched:
+                    reply_segments.extend(fetched)
+        if reply_segments:
+            images.extend(await self._collect_images_from_segments(reply_segments, event))
         
         # 2. 当前消息中的图片
-        for seg in chain:
-            if isinstance(seg, Image):
-                if seg.url and (img := await self._load_image_bytes(seg.url)):
-                    images.append(img)
-                elif hasattr(seg, 'file') and seg.file and (img := await self._load_image_bytes(seg.file)):
-                    images.append(img)
-                elif hasattr(seg, 'base64') and seg.base64:
-                    try:
-                        images.append(base64.b64decode(seg.base64))
-                    except Exception:
-                        pass
+        if chain:
+            images.extend(await self._collect_images_from_segments(chain, event))
         
         # 3. @用户头像（带自动过滤逻辑）
         self_id = str(event.get_self_id()).strip() if hasattr(event, 'get_self_id') else ""
         
         for seg in chain:
-            if isinstance(seg, At) and hasattr(seg, 'qq') and seg.qq != "all":
-                uid = str(seg.qq)
+            uid = self._extract_at_uid(seg)
+            if uid:
                 
                 # 过滤1：回复消息自动带的@（仅出现1次且是回复发送者）
                 if reply_sender_id and uid == reply_sender_id:
@@ -415,6 +631,18 @@ class Main(Star):
                 # 通过过滤，获取头像
                 if avatar := await self._get_avatar(uid):
                     images.append(avatar)
+
+        if not images and self.config.get("debug_mode", False):
+            try:
+                seg_info = []
+                for seg in chain:
+                    if isinstance(seg, dict):
+                        seg_info.append(f"dict:{seg.get('type')} keys={list(seg.keys())}")
+                    else:
+                        seg_info.append(f"{seg.__class__.__name__}")
+                logger.info(f"[get_images] 未获取到图片，segments={seg_info}")
+            except Exception:
+                pass
         
         return images
     
@@ -2042,7 +2270,7 @@ class Main(Star):
     @filter.command("生图菜单")
     async def cmd_menu(self, event: AstrMessageEvent):
         """显示菜单"""
-        menu = """🎨 RongheDraw 绘图插件 v1.2.8
+        menu = """🎨 RongheDraw 绘图插件 v1.2.9
 
 ━━━━ 📌 快速开始 ━━━━
 #f文 <描述>      文字生成图片
