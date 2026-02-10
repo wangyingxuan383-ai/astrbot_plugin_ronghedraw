@@ -46,7 +46,7 @@ def _init_db():
     # 个人次数统计表
     c.execute('''CREATE TABLE IF NOT EXISTS usage_stats
                  (user_id TEXT PRIMARY KEY, count INTEGER, last_date TEXT)''')
-    
+
     # 群级LLM统计表
     c.execute('''CREATE TABLE IF NOT EXISTS group_llm_usage
                  (group_id TEXT PRIMARY KEY, count INTEGER, last_date TEXT)''')

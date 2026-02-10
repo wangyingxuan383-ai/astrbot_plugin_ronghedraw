@@ -1,12 +1,10 @@
 """
 RongheDraw 多模式绘图插件
-支持 Flow/Generic/Gemini/Dreamina 四种 API 模式
+支持 Flow/Generic/Gemini 三种 API 模式
 作者: Antigravity
 版本: 1.2.13
 """
 import asyncio
-import inspect
-import html
 import base64
 import hashlib
 import io
@@ -14,9 +12,11 @@ import json
 import random
 import re
 import time
+from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Deque
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -38,17 +38,18 @@ try:
     from astrbot.core.utils.io import download_image_by_url
 except ImportError:
     download_image_by_url = None
-try:
-    from astrbot.core.utils.astrbot_path import get_astrbot_data_path
-except Exception:
-    get_astrbot_data_path = None
 from . import limit_manager
+
+
+# Input limits (align with LLM tool defaults).
+MAX_PROMPT_LEN = 900
+MAX_IMAGES = 10
 
 
 @register(
     "astrbot_plugin_ronghedraw",
     "Antigravity",
-    "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini/Dreamina 四种 API 模式",
+    "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini 三种 API 模式",
     "1.2.13",
     "https://github.com/wangyingxuan383-ai/astrbot_plugin_ronghedraw",
 )
@@ -62,9 +63,6 @@ class Main(Star):
         self.config = config
         self.prompt_map: Dict[str, str] = {}
         
-        # Flow 模式状态
-        self.flow_current_model_index = 0
-        
         # Key 轮询索引
         self.generic_key_index = 0
         self.gemini_key_index = 0
@@ -74,8 +72,7 @@ class Main(Star):
         self.mode_locks = {
             "flow": asyncio.Lock(),
             "generic": asyncio.Lock(),
-            "gemini": asyncio.Lock(),
-            "dreamina": asyncio.Lock()
+            "gemini": asyncio.Lock()
         }
         
         # 加载预设
@@ -100,8 +97,14 @@ class Main(Star):
         # 跟踪pending的asyncio任务
         self.pending_tasks = set()
 
-        # LLM工具“上一次图片”缓存（按会话）
-        self.llm_last_image_cache: Dict[str, Dict[str, Any]] = {}
+        # LLM工具“上一次图片”缓存（全局，按时间顺序，最多保留最近N张）
+        # 语义：跨会话共享，取“最新一张”作为上一张图。
+        self.llm_last_image_cache: Deque[Dict[str, Any]] = deque()
+
+        # OneBot cookies cache: used to download QQ CDN images (qpic) with bot session cookies.
+        # Avoids returning "QQ空间 未经允许不可引用" placeholder images.
+        self._onebot_cookie_cache: Dict[str, Tuple[str, float]] = {}
+        self._onebot_cookie_lock = asyncio.Lock()
         
         # 检查依赖
         self._check_dependencies()
@@ -130,10 +133,13 @@ class Main(Star):
 
     def _apply_default_mode(self, mode: str, source: str = "manual") -> str:
         """应用默认模式切换（白名单/普通用户/LLM统一）"""
+        supported = {"flow", "generic", "gemini"}
+        if mode not in supported:
+            return str(mode)
         self.config["llm_default_mode"] = mode
         self.config["normal_user_default_mode"] = mode
         self.config["default_mode"] = mode
-        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini", "dreamina": "Dreamina"}[mode]
+        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini"}.get(mode, mode)
         if self.config.get("debug_mode", False):
             logger.info(f"[RongheDraw] 默认模式切换为 {mode_name} ({source})")
         return mode_name
@@ -223,10 +229,63 @@ class Main(Star):
         # 验证配置
         self._validate_config()
 
+        # 兼容迁移：移除旧版 help_text 中的 #f切换模型 文案
+        try:
+            help_text = self.config.get("help_text")
+            if isinstance(help_text, str) and "f切换模型" in help_text:
+                out_lines: List[str] = []
+                for ln in help_text.splitlines():
+                    if "f切换模型" not in ln:
+                        out_lines.append(ln)
+                        continue
+
+                    # 尽量只移除该指令，不删除同一行里的其他帮助内容
+                    if "|" in ln:
+                        m = re.match(r"^(\s*)(.*)$", ln)
+                        prefix, rest = (m.group(1), m.group(2)) if m else ("", ln)
+                        parts = [p.strip() for p in rest.split("|")]
+                        parts = [p for p in parts if p and "f切换模型" not in p]
+                        if parts:
+                            out_lines.append(prefix + " | ".join(parts))
+                        # 若整行只剩空内容，则跳过该行
+                    else:
+                        # 单独一行的 f切换模型：直接移除整行
+                        continue
+
+                new_help = "\n".join(out_lines).rstrip()
+                if new_help != help_text:
+                    self.config["help_text"] = new_help
+                    if hasattr(self.config, "save_config"):
+                        self.config.save_config()
+        except Exception:
+            pass
+
         # 启动定时默认模式切换任务
         self._start_mode_schedule_tasks()
         
         logger.info('[RongheDraw] 插件已激活，资源已初始化')
+
+    async def _safe_send_plain(self, event: AstrMessageEvent, text: str):
+        """安全发送纯文本消息：发送失败不影响后续生成流程。"""
+        try:
+            if not hasattr(event, "send"):
+                return
+            await event.send(event.plain_result(text))
+        except Exception:
+            return
+
+    def _humanize_error(self, mode: str, err: Any) -> str:
+        """将常见错误转为更清晰的用户可读提示（不改变原始错误日志）。"""
+        s = str(err or "").strip()
+        if not s:
+            return "未知错误"
+
+        # Gemini/代理常见：503 无容量
+        if ("API错误 (503)" in s or " 503" in s or "\"code\": 503" in s) and ("No capacity available" in s):
+            return (
+                "模型当前无容量(503)，请稍后再试；或切换到 Flow：#切换到 f / 直接用 #f文 ..."
+            )
+        return s
     
     def _load_prompt_map(self):
         """加载预设提示词"""
@@ -265,66 +324,327 @@ class Main(Star):
         return self._http_session
     
     # ================== 图片处理 ==================
+
+    async def _onebot_call_action(self, event: AstrMessageEvent, action: str, **params) -> dict | None:
+        """Call OneBot action if available (aiocqhttp/NapCat), return raw dict or None."""
+        bot = getattr(event, "bot", None)
+        if bot is None:
+            return None
+        api = getattr(bot, "api", None)
+        try:
+            if api is not None and hasattr(api, "call_action"):
+                return await api.call_action(action, **params)
+            if hasattr(bot, "call_action"):
+                return await bot.call_action(action, **params)
+        except Exception as e:
+            if self.config.get("debug_mode", False):
+                logger.warning(f"[OneBot] call_action {action} failed: {e}")
+        return None
+
+    async def _get_onebot_cookies(self, event: AstrMessageEvent, domain: str) -> str | None:
+        """Get cookies from NapCat/go-cqhttp via OneBot `get_cookies`, with small TTL cache."""
+        d = str(domain or "").strip()
+        if not d:
+            return None
+        now = time.time()
+        cached = self._onebot_cookie_cache.get(d)
+        if cached and cached[1] > now:
+            return cached[0]
+
+        async with self._onebot_cookie_lock:
+            cached = self._onebot_cookie_cache.get(d)
+            if cached and cached[1] > now:
+                return cached[0]
+
+            res = await self._onebot_call_action(event, "get_cookies", domain=d)
+            data = None
+            if isinstance(res, dict):
+                data = res.get("data") if isinstance(res.get("data"), dict) else res
+            cookies = data.get("cookies") if isinstance(data, dict) else None
+            if cookies:
+                cookies = str(cookies)
+                # Cookies are generally stable; keep short TTL to avoid stale sessions.
+                self._onebot_cookie_cache[d] = (cookies, now + 300)
+                return cookies
+        return None
+
+    async def _download_qq_cdn_image(self, event: AstrMessageEvent, url: str) -> bytes | None:
+        """Download QQ CDN images (qpic/nt.qq.com.cn) with OneBot cookies if possible."""
+        u = str(url or "").strip()
+        if not u:
+            return None
+
+        try:
+            parts = urlsplit(u)
+            host = (parts.netloc or "").lower()
+        except Exception:
+            host = ""
+
+        # Try getting cookies from OneBot side (NapCat has logged-in session).
+        cookies = None
+        domains_to_try: List[str] = []
+        if host:
+            domains_to_try.append(host)
+            if host.endswith(".qpic.cn") and host != "qpic.cn":
+                domains_to_try.append("qpic.cn")
+            if host.endswith(".nt.qq.com.cn") and host != "nt.qq.com.cn":
+                domains_to_try.append("nt.qq.com.cn")
+
+        for d in domains_to_try:
+            cookies = await self._get_onebot_cookies(event, d)
+            if cookies:
+                break
+
+        timeout = self.config.get("timeout", 120)
+        timeout_obj = aiohttp.ClientTimeout(total=timeout)
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            # Use a common QQ referer; without cookies often gets 400/illref.
+            "Referer": "https://im.qq.com/",
+            "Origin": "https://im.qq.com",
+        }
+        if cookies:
+            headers["Cookie"] = cookies
+
+        try:
+            session = await self._get_session()
+            async with session.get(u, headers=headers, timeout=timeout_obj) as resp:
+                if resp.status != 200:
+                    if self.config.get("debug_mode", False):
+                        try:
+                            text = await resp.text()
+                        except Exception:
+                            text = ""
+                        logger.warning(f"[QQCDN] 下载失败({resp.status}): {text[:160]}")
+                    return None
+
+                # QQ may return a placeholder image for illegal referrer / unauthenticated requests.
+                xinfo = str(resp.headers.get("X-Info", "")).lower()
+                if "illref" in xinfo:
+                    if self.config.get("debug_mode", False):
+                        logger.warning("[QQCDN] 命中防盗链(illref)，将尝试其它方式获取真实图片。")
+                    return None
+
+                ctype = str(resp.headers.get("Content-Type", "")).lower()
+                data = await resp.read()
+                if not data:
+                    return None
+                # Some failures are JSON (expired url, etc.)
+                if "json" in ctype or data[:1] == b"{":
+                    if self.config.get("debug_mode", False):
+                        logger.warning(f"[QQCDN] 返回非图片内容: content-type={ctype}, body={data[:120]!r}")
+                    return None
+
+                if self.config.get("debug_mode", False):
+                    logger.info(f"[QQCDN] 下载成功: host={host}, size={len(data)}")
+                return data
+        except Exception as e:
+            if self.config.get("debug_mode", False):
+                logger.warning(f"[QQCDN] 下载异常: {e}")
+            return None
+
+    async def _load_onebot_image_bytes(
+        self,
+        event: AstrMessageEvent,
+        url: str | None,
+        file: str | None,
+        path: str | None = None,
+        file_unique: str | None = None,
+    ) -> bytes | None:
+        """Load image bytes for OneBot (NapCat/go-cqhttp) image segments reliably."""
+
+        # 1) Direct local path provided by segment (best)
+        for p in (path, file):
+            if p and isinstance(p, str) and Path(p).is_file():
+                try:
+                    raw = Path(p).read_bytes()
+                    if raw:
+                        return await asyncio.to_thread(self._extract_first_frame_sync, raw)
+                except Exception:
+                    pass
+
+        # 2) base64/data url in `file`
+        if file and isinstance(file, str):
+            if file.startswith("base64://"):
+                try:
+                    raw = base64.b64decode(file[9:])
+                    return await asyncio.to_thread(self._extract_first_frame_sync, raw)
+                except Exception:
+                    pass
+            if file.startswith("data:"):
+                try:
+                    b64 = file.split(",", 1)[1]
+                    raw = base64.b64decode(b64)
+                    return await asyncio.to_thread(self._extract_first_frame_sync, raw)
+                except Exception:
+                    pass
+
+        # 3) Try cache directories by `file_unique` (some platforms store by unique key/md5)
+        if file_unique and isinstance(file_unique, str):
+            fu = file_unique.strip()
+            if fu:
+                candidates: List[Path] = []
+                base = Path("/AstrBot/data/chat_history/images")
+                candidates.append(base / fu)
+                if "." not in fu:
+                    for ext in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+                        candidates.append(base / f"{fu}{ext}")
+                for c in candidates:
+                    if c.is_file():
+                        try:
+                            raw = c.read_bytes()
+                            if raw:
+                                if self.config.get("debug_mode", False):
+                                    logger.info(f"[ImageCache] 命中: {c}")
+                                return await asyncio.to_thread(self._extract_first_frame_sync, raw)
+                        except Exception:
+                            pass
+
+        # 4) Use OneBot get_image to refresh URL / download path / base64 (if enabled).
+        resolved_url = url
+        if file and isinstance(file, str) and not file.startswith(("http", "file:///", "base64://", "data:")):
+            res = await self._onebot_call_action(event, "get_image", file=file)
+            data = None
+            if isinstance(res, dict):
+                data = res.get("data") if isinstance(res.get("data"), dict) else res
+            if isinstance(data, dict):
+                b64 = data.get("base64")
+                if b64 and isinstance(b64, str):
+                    try:
+                        raw = base64.b64decode(b64)
+                        if raw:
+                            return await asyncio.to_thread(self._extract_first_frame_sync, raw)
+                    except Exception:
+                        pass
+                fpath = data.get("file")
+                if fpath and isinstance(fpath, str) and Path(fpath).is_file():
+                    try:
+                        raw = Path(fpath).read_bytes()
+                        if raw:
+                            return await asyncio.to_thread(self._extract_first_frame_sync, raw)
+                    except Exception:
+                        pass
+                rurl = data.get("url")
+                if rurl and isinstance(rurl, str):
+                    resolved_url = rurl
+
+        # 5) Download by URL (QQ CDN uses cookies), fallback to generic downloader.
+        for src in (resolved_url, url, file):
+            if not src or not isinstance(src, str):
+                continue
+            s = src.strip()
+            if not s:
+                continue
+            if s.startswith("http"):
+                try:
+                    host = urlsplit(s).netloc.lower()
+                except Exception:
+                    host = ""
+                if host.endswith("qpic.cn") or host.endswith("nt.qq.com.cn"):
+                    raw = await self._download_qq_cdn_image(event, s)
+                else:
+                    raw = await self._download_image(s)
+                if raw:
+                    return await asyncio.to_thread(self._extract_first_frame_sync, raw)
+
+        return None
     
     async def _download_image(self, url: str) -> bytes | None:
         """
         下载图片（参照gemini_image_ref实现）
         优先使用AstrBot内置工具download_image_by_url，它能正确处理QQ图片链接
         """
+        u = str(url or "").strip()
+        if not u:
+            return None
+
         # 方式1：尝试作为本地文件读取
-        if Path(url).is_file():
+        if Path(u).is_file():
             try:
-                return Path(url).read_bytes()
+                return Path(u).read_bytes()
             except Exception:
                 pass
+
+        # 方式2：QQ 临时图片链接（无 cookie 时可能返回 illref 占位图或 JSON 错误）
+        try:
+            parts = urlsplit(u)
+            host = (parts.netloc or "").lower()
+        except Exception:
+            parts = None
+            host = ""
+
+        if host.endswith("qpic.cn") or host.endswith("nt.qq.com.cn"):
+            timeout = self.config.get("timeout", 120)
+            timeout_obj = aiohttp.ClientTimeout(total=timeout)
+            headers = {
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "Referer": "https://im.qq.com/",
+                "Origin": "https://im.qq.com",
+            }
+            for i in range(2):
+                try:
+                    session = await self._get_session()
+                    async with session.get(u, headers=headers, timeout=timeout_obj) as resp:
+                        if resp.status == 200:
+                            xinfo = str(resp.headers.get("X-Info", "")).lower()
+                            if "illref" in xinfo:
+                                # Prevent feeding placeholder images downstream.
+                                if self.config.get("debug_mode", False):
+                                    logger.warning("[QQImage] 命中防盗链(illref)，忽略该响应。")
+                                continue
+                            data = await resp.read()
+                            if data:
+                                ctype = str(resp.headers.get("Content-Type", "")).lower()
+                                if "json" in ctype or data[:1] == b"{":
+                                    if self.config.get("debug_mode", False):
+                                        logger.warning(f"[QQImage] 返回非图片内容: content-type={ctype}, body={data[:120]!r}")
+                                    continue
+                                if self.config.get("debug_mode", False):
+                                    logger.info(f"[QQImage] 成功下载: host={host}, size={len(data)}")
+                                return data
+                        else:
+                            # 某些站点会返回 json 错误，直接进入兜底逻辑
+                            if self.config.get("debug_mode", False):
+                                text = await resp.text()
+                                logger.warning(f"[QQImage] 下载失败({resp.status}): {text[:120]}")
+                except Exception as e:
+                    if self.config.get("debug_mode", False):
+                        logger.warning(f"[QQImage] 下载异常: {e}")
+                await asyncio.sleep(0.2)
         
-        # 方式2：使用AstrBot内置下载工具（推荐，能处理QQ图片链接）
+        # 方式3：使用AstrBot内置下载工具（推荐，能处理部分QQ图片链接）
         if download_image_by_url:
             try:
-                path = await download_image_by_url(url)
+                path = await download_image_by_url(u)
                 if path and Path(path).is_file():
                     data = Path(path).read_bytes()
                     if self.config.get("debug_mode", False):
-                        logger.info(f"[download_image_by_url] 成功下载: {url[:60]}... (size={len(data)})")
-                    if data and self._looks_like_image_bytes(data):
+                        logger.info(f"[download_image_by_url] 成功下载: {u[:60]}... (size={len(data)})")
+                    if data:
                         return data
-                    if self.config.get("debug_mode", False):
-                        logger.warning(f"[download_image_by_url] 非图片内容: {url[:60]}... (size={len(data)})")
             except Exception as e:
                 if self.config.get("debug_mode", False):
                     logger.warning(f"[download_image_by_url] 下载失败: {e}")
         
-        # 方式3：回退到直接HTTP请求（公网URL）
+        # 方式4：回退到直接HTTP请求（公网URL）
         timeout = self.config.get("timeout", 120)
         timeout_obj = aiohttp.ClientTimeout(total=timeout)
         
-        headers = {
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        }
-        if "qpic.cn" in url:
-            headers["Referer"] = "https://gchat.qpic.cn/"
-            headers["Origin"] = "https://gchat.qpic.cn"
-
         for i in range(3):
             try:
                 session = await self._get_session()
-                async with session.get(url, timeout=timeout_obj, headers=headers) as resp:
+                async with session.get(u, timeout=timeout_obj) as resp:
                     resp.raise_for_status()
-                    data = await resp.read()
-                    content_type = resp.headers.get("Content-Type", "")
-                    if data and (content_type.startswith("image/") or self._looks_like_image_bytes(data)):
-                        return data
-                    if self.config.get("debug_mode", False):
-                        logger.warning(
-                            f"下载图片失败: 非图片内容 ({content_type}) {url[:60]}... (size={len(data)})"
-                        )
+                    return await resp.read()
             except Exception as e:
                 if i < 2:
                     await asyncio.sleep(1)
                 else:
-                    logger.error(f"下载图片失败: {url[:60]}..., 错误: {e}")
+                    logger.error(f"下载图片失败: {u[:60]}..., 错误: {e}")
         return None
     
     async def _get_avatar(self, user_id: str) -> bytes | None:
@@ -350,37 +670,10 @@ class Main(Star):
         except Exception:
             return raw
 
-    def _looks_like_image_bytes(self, data: bytes) -> bool:
-        """快速判断bytes是否像图片（避免把错误页面当图片）"""
-        if not data or len(data) < 10:
-            return False
-        if data.startswith(b"\xff\xd8\xff"):  # JPEG
-            return True
-        if data.startswith(b"\x89PNG\r\n\x1a\n"):  # PNG
-            return True
-        if data[:6] in (b"GIF87a", b"GIF89a"):  # GIF
-            return True
-        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":  # WEBP
-            return True
-        if data[:2] == b"BM":  # BMP
-            return True
-        if data[:4] in (b"II*\x00", b"MM\x00*"):  # TIFF
-            return True
-        return False
-    
     async def _load_image_bytes(self, src: str) -> bytes | None:
         """从各种来源加载图片"""
-        if not src:
-            return None
-        src = self._normalize_file_url(src)
         if Path(src).is_file():
-            try:
-                data = Path(src).read_bytes()
-            except Exception:
-                return None
-            if self._looks_like_image_bytes(data):
-                return data
-            return None
+            return Path(src).read_bytes()
         elif src.startswith("http"):
             raw = await self._download_image(src)
             if raw:
@@ -399,471 +692,182 @@ class Main(Star):
                 pass
         return None
 
-    def _as_segments(self, obj: Any) -> List[Any]:
-        """尽量将消息对象解析为segment列表"""
-        if obj is None:
-            return []
-        if isinstance(obj, list):
-            return obj
-        if isinstance(obj, tuple):
-            return list(obj)
-        for attr in ("message", "chain"):
-            if hasattr(obj, attr):
-                try:
-                    return list(getattr(obj, attr) or [])
-                except Exception:
-                    pass
-        try:
-            return list(obj)
-        except Exception:
-            pass
-        if isinstance(obj, dict):
-            data = obj.get("data", obj)
-            if isinstance(data, dict):
-                for key in ("message", "messages", "message_chain", "chain"):
-                    if key in data:
-                        val = data[key]
-                        try:
-                            return list(val) if not isinstance(val, str) else []
-                        except Exception:
-                            return []
-        return []
-
-    def _parse_cq_message(self, text: str) -> List[dict]:
-        """从CQ码文本解析出图片/回复/@段"""
-        segments: List[dict] = []
-        if not text:
-            return segments
-        for m in re.finditer(r"\\[CQ:([a-zA-Z0-9_]+),([^\\]]*)\\]", text):
-            seg_type = m.group(1)
-            data_str = m.group(2)
-            data: dict = {}
-            for part in data_str.split(","):
-                if "=" in part:
-                    k, v = part.split("=", 1)
-                    data[k] = html.unescape(v)
-            if seg_type in {"image", "reply", "at"}:
-                segments.append({"type": seg_type, "data": data})
-        return segments
-
-    def _segments_from_raw_message(self, raw: Any) -> List[Any]:
-        """从raw_message中获取segments"""
-        if isinstance(raw, dict):
-            msg = raw.get("message")
-            if isinstance(msg, list):
-                return msg
-            if isinstance(msg, str):
-                return self._parse_cq_message(msg)
-            raw_msg = raw.get("raw_message")
-            if isinstance(raw_msg, str):
-                return self._parse_cq_message(raw_msg)
-        if isinstance(raw, str):
-            return self._parse_cq_message(raw)
-        return []
-
-    def _segment_is_image(self, seg: Any) -> bool:
-        if isinstance(seg, Image):
-            return True
-        if isinstance(seg, dict) and seg.get("type") == "image":
-            return True
-        if hasattr(seg, "type") and getattr(seg, "type") == "image":
-            return True
-        return False
-
-    def _segment_is_reply(self, seg: Any) -> bool:
-        if isinstance(seg, Reply):
-            return True
-        if isinstance(seg, dict) and seg.get("type") == "reply":
-            return True
-        if hasattr(seg, "type") and getattr(seg, "type") == "reply":
-            return True
-        return False
-
-    def _segments_has_image(self, segments: List[Any]) -> bool:
-        return any(self._segment_is_image(seg) for seg in segments)
-
-    def _segments_has_reply(self, segments: List[Any]) -> bool:
-        return any(self._segment_is_reply(seg) for seg in segments)
-
-    def _normalize_file_url(self, src: str) -> str:
-        """规范化 file:// URL 为本地路径"""
-        if not src:
-            return src
-        if src.startswith("file:"):
-            return re.sub(r"^file:/+", "/", src)
-        return src
-
-    def _history_group_path(self, group_id: str) -> Path | None:
-        if not group_id or not get_astrbot_data_path:
-            return None
-        base = Path(get_astrbot_data_path())
-        path = base / "chat_history" / "aiocqhttp" / "group" / f"{group_id}.json"
-        return path if path.exists() else None
-
-    def _extract_history_image_sources(self, seg: dict) -> List[str]:
-        sources: List[str] = []
-        if not isinstance(seg, dict):
-            return sources
-        # jsonpickle 格式
-        if isinstance(seg.get("py/object"), str) and seg.get("py/object", "").endswith(".Image"):
-            state = seg.get("py/state", {}).get("__dict__", {})
-            sources.extend(self._extract_image_sources_from_data(state))
-            return sources
-        # 普通OneBot格式
-        if seg.get("type") == "image":
-            data = seg.get("data", seg)
-            if isinstance(data, dict):
-                sources.extend(self._extract_image_sources_from_data(data))
-        return sources
-
-    async def _load_reply_images_from_history(self, group_id: str, reply_id: str) -> List[bytes]:
-        """从本地聊天记录读取回复消息图片（兜底）"""
-        path = self._history_group_path(group_id)
-        if not path:
-            return []
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return []
-        target = str(reply_id)
-        for msg in reversed(data):
-            if str(msg.get("message_id")) != target:
-                continue
-            images: List[bytes] = []
-            for seg in msg.get("message", []):
-                for src in self._extract_history_image_sources(seg):
-                    src = self._normalize_file_url(src)
-                    img = await self._load_image_bytes(src)
-                    if img:
-                        images.append(img)
-            return images
-        return []
-
-    def _extract_image_sources_from_data(self, data: dict) -> List[str]:
-        """从segment data中提取可能的图片来源"""
-        if not isinstance(data, dict):
-            return []
-        sources: List[str] = []
-        for key in ("url", "file", "path", "src", "image", "file_id", "id"):
-            val = data.get(key)
-            if isinstance(val, str) and val.strip():
-                sources.append(val.strip())
-        for key in ("base64", "b64"):
-            val = data.get(key)
-            if isinstance(val, str) and val.strip():
-                v = val.strip()
-                if v.startswith("data:") or v.startswith("base64://"):
-                    sources.append(v)
-                else:
-                    sources.append("base64://" + v)
-        return sources
-
-    async def _call_bot_method(self, bot: Any, name: str, **kwargs) -> Any:
-        """安全调用bot方法（兼容同步/异步）"""
-        func = getattr(bot, name, None)
-        if not func:
-            return None
-        try:
-            result = func(**kwargs)
-            if inspect.isawaitable(result):
-                result = await result
-            return result
-        except TypeError:
-            pass
-        except Exception:
-            return None
-        try:
-            result = func(*list(kwargs.values()))
-            if inspect.isawaitable(result):
-                result = await result
-            return result
-        except Exception:
-            return None
-
-    async def _load_image_bytes_with_event(self, src: str, event: AstrMessageEvent | None) -> bytes | None:
-        """支持file_id等特殊字段的图片加载"""
-        if not src:
-            return None
-        s = self._normalize_file_url(str(src).strip())
-        if not s:
-            return None
-        if s.startswith(("http://", "https://", "base64://", "data:")) or Path(s).is_file():
-            return await self._load_image_bytes(s)
-        if re.fullmatch(r"[A-Za-z0-9+/=]+", s or "") and len(s) > 200:
-            try:
-                return base64.b64decode(s)
-            except Exception:
-                pass
-        bot = getattr(event, "bot", None) if event else None
-        if bot and hasattr(bot, "get_image"):
-            resp = await self._call_bot_method(bot, "get_image", file=s)
-            if resp is None:
-                resp = await self._call_bot_method(bot, "get_image", file_id=s)
-            if isinstance(resp, dict):
-                data = resp.get("data", resp)
-                if isinstance(data, dict):
-                    for source in self._extract_image_sources_from_data(data):
-                        if source == s:
-                            continue
-                        img = await self._load_image_bytes(source)
-                        if img:
-                            return img
-        return None
-
-    async def _collect_images_from_segments(self, segments: List[Any], event: AstrMessageEvent) -> List[bytes]:
-        """从segment列表中提取所有图片bytes"""
-        images: List[bytes] = []
-        for seg in segments:
-            if isinstance(seg, Image):
-                sources: List[str] = []
-                if getattr(seg, "url", None):
-                    sources.append(seg.url)
-                if getattr(seg, "file", None):
-                    sources.append(seg.file)
-                if getattr(seg, "base64", None):
-                    try:
-                        images.append(base64.b64decode(seg.base64))
-                        continue
-                    except Exception:
-                        pass
-                if hasattr(seg, "data") and isinstance(seg.data, dict):
-                    sources.extend(self._extract_image_sources_from_data(seg.data))
-                for src in sources:
-                    img = await self._load_image_bytes_with_event(src, event)
-                    if img:
-                        images.append(img)
-                continue
-            if isinstance(seg, dict):
-                seg_type = seg.get("type")
-                if seg_type == "image":
-                    data = seg.get("data", seg)
-                    if isinstance(data, dict) and "base64" in data:
-                        try:
-                            images.append(base64.b64decode(data["base64"]))
-                            continue
-                        except Exception:
-                            pass
-                    sources = self._extract_image_sources_from_data(data if isinstance(data, dict) else {})
-                    for src in sources:
-                        img = await self._load_image_bytes_with_event(src, event)
-                        if img:
-                            images.append(img)
-                    continue
-            if hasattr(seg, "type") and getattr(seg, "type") == "image":
-                data = getattr(seg, "data", None)
-                sources = self._extract_image_sources_from_data(data if isinstance(data, dict) else {})
-                for src in sources:
-                    img = await self._load_image_bytes_with_event(src, event)
-                    if img:
-                        images.append(img)
-        return images
-
-    def _extract_reply_id(self, seg: Any) -> str | None:
-        """提取reply消息ID"""
-        if isinstance(seg, Reply):
-            for key in ("id", "message_id", "msg_id"):
-                val = getattr(seg, key, None)
-                if val:
-                    return str(val)
-        if isinstance(seg, dict) and seg.get("type") == "reply":
-            data = seg.get("data", seg)
-            if isinstance(data, dict):
-                for key in ("id", "message_id", "msg_id"):
-                    if data.get(key):
-                        return str(data.get(key))
-        if hasattr(seg, "type") and getattr(seg, "type") == "reply":
-            data = getattr(seg, "data", None)
-            if isinstance(data, dict):
-                for key in ("id", "message_id", "msg_id"):
-                    if data.get(key):
-                        return str(data.get(key))
-            for key in ("id", "message_id", "msg_id"):
-                val = getattr(seg, key, None)
-                if val:
-                    return str(val)
-        return None
-
-    def _extract_at_uid(self, seg: Any) -> str | None:
-        """提取@用户ID"""
-        if isinstance(seg, At) and hasattr(seg, "qq") and seg.qq != "all":
-            return str(seg.qq)
-        if isinstance(seg, dict) and seg.get("type") == "at":
-            data = seg.get("data", seg)
-            if isinstance(data, dict):
-                uid = data.get("qq") or data.get("user_id") or data.get("id")
-                if uid and uid != "all":
-                    return str(uid)
-        if hasattr(seg, "type") and getattr(seg, "type") == "at":
-            data = getattr(seg, "data", None)
-            if isinstance(data, dict):
-                uid = data.get("qq") or data.get("user_id") or data.get("id")
-                if uid and uid != "all":
-                    return str(uid)
-            if hasattr(seg, "qq") and getattr(seg, "qq") != "all":
-                return str(getattr(seg, "qq"))
-        return None
-
-    async def _fetch_reply_segments(self, event: AstrMessageEvent, reply_id: str) -> List[Any]:
-        """通过reply_id拉取消息内容"""
-        bot = getattr(event, "bot", None)
-        if not bot or not reply_id:
-            return []
-        for method in ("get_msg", "get_message"):
-            resp = await self._call_bot_method(bot, method, message_id=reply_id)
-            if resp is None:
-                resp = await self._call_bot_method(bot, method, id=reply_id)
-            if resp is None:
-                resp = await self._call_bot_method(bot, method, msg_id=reply_id)
-            if resp is not None:
-                segments = self._as_segments(resp)
-                if segments:
-                    return segments
-        return []
-    
     async def get_images(self, event: AstrMessageEvent) -> List[bytes]:
         """
         获取消息中的所有图片（支持多图，合并回复图片、当前消息图片、@用户头像）
-        参照gemini_image_ref实现At自动过滤：过滤触发机器人的@和回复自动@
+        参考 astrbot_plugin_shoubanhua 的图片提取方式
         """
         images: List[bytes] = []
-        chain = self._as_segments(getattr(event, "message_obj", None))
-        if not chain:
-            chain = self._as_segments(getattr(event, "message", None))
-        raw_segments = self._segments_from_raw_message(getattr(getattr(event, "message_obj", None), "raw_message", None))
-        if not chain:
-            chain = []
-        
-        # 0. 预扫描：获取回复发送者ID和统计At次数（用于过滤自动@）
-        reply_sender_id = None
-        at_counts: dict = {}
+        tasks: List[Any] = []
+        at_users: set[str] = set()
 
-        primary_segments = chain if chain else raw_segments
-        fallback_segments = raw_segments if chain else []
+        chain = []
+        if hasattr(event, "message_obj") and hasattr(event.message_obj, "message"):
+            chain = event.message_obj.message or []
+        elif hasattr(event, "get_messages"):
+            try:
+                chain = event.get_messages() or []
+            except Exception:
+                chain = []
 
-        for seg in primary_segments:
-            if isinstance(seg, Reply):
-                if hasattr(seg, 'sender_id') and seg.sender_id:
-                    reply_sender_id = str(seg.sender_id)
-            elif isinstance(seg, dict) and seg.get("type") == "reply":
+        ignore_id = str(event.get_self_id()).strip() if hasattr(event, "get_self_id") else ""
+
+        for seg in chain:
+            # 回复链
+            if isinstance(seg, Reply) and getattr(seg, "chain", None):
+                for s in seg.chain:
+                    if isinstance(s, Image):
+                        tasks.append(
+                            self._load_onebot_image_bytes(
+                                event,
+                                url=getattr(s, "url", None),
+                                file=getattr(s, "file", None),
+                                path=getattr(s, "path", None),
+                                file_unique=getattr(s, "file_unique", None),
+                            )
+                        )
+                    elif isinstance(s, dict) and s.get("type") == "image":
+                        data = s.get("data", s)
+                        url = (data or {}).get("url") or s.get("url")
+                        file = (data or {}).get("file") or s.get("file")
+                        path = (data or {}).get("path") or s.get("path")
+                        file_unique = (data or {}).get("file_unique") or s.get("file_unique")
+                        if url:
+                            tasks.append(self._load_onebot_image_bytes(event, url=url, file=file, path=path, file_unique=file_unique))
+                        elif file:
+                            tasks.append(self._load_onebot_image_bytes(event, url=None, file=file, path=path, file_unique=file_unique))
+            # 当前消息图片
+            elif isinstance(seg, Image):
+                tasks.append(
+                    self._load_onebot_image_bytes(
+                        event,
+                        url=getattr(seg, "url", None),
+                        file=getattr(seg, "file", None),
+                        path=getattr(seg, "path", None),
+                        file_unique=getattr(seg, "file_unique", None),
+                    )
+                )
+            elif isinstance(seg, dict) and seg.get("type") == "image":
                 data = seg.get("data", seg)
-                if isinstance(data, dict) and data.get("sender_id"):
-                    reply_sender_id = str(data.get("sender_id"))
-            uid = self._extract_at_uid(seg)
-            if uid:
-                at_counts[uid] = at_counts.get(uid, 0) + 1
-        
-        # 1. 回复链/回复消息中的图片
-        reply_segments: List[Any] = []
-        reply_ids: set[str] = set()
-        for seg in primary_segments:
-            if isinstance(seg, Reply) and hasattr(seg, 'chain') and seg.chain:
-                reply_segments.extend(list(seg.chain))
-                continue
-            reply_id = self._extract_reply_id(seg)
-            if reply_id:
-                reply_ids.add(reply_id)
-        for seg in fallback_segments:
-            reply_id = self._extract_reply_id(seg)
-            if reply_id:
-                reply_ids.add(reply_id)
-        for reply_id in reply_ids:
-            fetched = await self._fetch_reply_segments(event, reply_id)
-            if fetched:
-                reply_segments.extend(fetched)
-        reply_count = 0
-        if reply_segments:
-            reply_imgs = await self._collect_images_from_segments(reply_segments, event)
-            reply_count = len(reply_imgs)
-            images.extend(reply_imgs)
-        # 回复兜底：从本地聊天记录读取
-        if reply_ids and reply_count == 0:
-            group_id = event.get_group_id() if hasattr(event, "get_group_id") else ""
-            for rid in reply_ids:
-                hist_imgs = await self._load_reply_images_from_history(group_id, rid)
-                if hist_imgs:
-                    reply_count += len(hist_imgs)
-                    images.extend(hist_imgs)
-        
-        # 2. 当前消息中的图片
-        current_count = 0
-        if primary_segments and self._segments_has_image(primary_segments):
-            current_imgs = await self._collect_images_from_segments(primary_segments, event)
-            current_count = len(current_imgs)
-            images.extend(current_imgs)
-        elif fallback_segments and self._segments_has_image(fallback_segments):
-            current_imgs = await self._collect_images_from_segments(fallback_segments, event)
-            current_count = len(current_imgs)
-            images.extend(current_imgs)
-        
-        # 3. @用户头像（带自动过滤逻辑）
-        self_id = str(event.get_self_id()).strip() if hasattr(event, 'get_self_id') else ""
-        
-        avatar_count = 0
-        for seg in primary_segments:
-            uid = self._extract_at_uid(seg)
-            if uid:
-                
-                # 过滤1：回复消息自动带的@（仅出现1次且是回复发送者）
-                if reply_sender_id and uid == reply_sender_id:
-                    if at_counts.get(uid, 0) == 1:
-                        if self.config.get("debug_mode", False):
-                            logger.debug(f"[get_images] 过滤回复自动@: {uid}")
+                url = (data or {}).get("url") or seg.get("url")
+                file = (data or {}).get("file") or seg.get("file")
+                path = (data or {}).get("path") or seg.get("path")
+                file_unique = (data or {}).get("file_unique") or seg.get("file_unique")
+                if url:
+                    tasks.append(self._load_onebot_image_bytes(event, url=url, file=file, path=path, file_unique=file_unique))
+                elif file:
+                    tasks.append(self._load_onebot_image_bytes(event, url=None, file=file, path=path, file_unique=file_unique))
+            # @用户
+            elif isinstance(seg, At):
+                qq = str(getattr(seg, "qq", "")).strip()
+                if qq and qq != "all":
+                    if ignore_id and qq == ignore_id:
                         continue
-                
-                # 过滤2：触发机器人的@（仅出现1次且是机器人自己）
-                if self_id and uid == self_id:
-                    if at_counts.get(uid, 0) == 1:
-                        if self.config.get("debug_mode", False):
-                            logger.debug(f"[get_images] 过滤机器人触发@: {uid}")
-                        continue
-                
-                # 通过过滤，获取头像
-                if avatar := await self._get_avatar(uid):
-                    avatar_count += 1
-                    images.append(avatar)
-        # 文本@兜底
+                    at_users.add(qq)
+
+        # 文本中 @ 兜底
         try:
-            text_ats = re.findall(r'@(\\d+)', event.get_message_str())
-            for uid in text_ats:
-                uid = str(uid).strip()
-                if self_id and uid == self_id:
-                    continue
-                if avatar := await self._get_avatar(uid):
-                    avatar_count += 1
-                    images.append(avatar)
+            text = event.get_message_str() if hasattr(event, "get_message_str") else getattr(event, "message_str", "")
+            if text:
+                for qq in re.findall(r"@(\d+)", text):
+                    qq = str(qq).strip()
+                    if ignore_id and qq == ignore_id:
+                        continue
+                    at_users.add(qq)
         except Exception:
             pass
 
-        # 去重（防止重复图片）
-        if images:
-            uniq: List[bytes] = []
-            seen: set[str] = set()
-            for img in images:
-                digest = hashlib.md5(img).hexdigest()
-                if digest in seen:
-                    continue
-                seen.add(digest)
-                uniq.append(img)
-            images = uniq
+        # 头像任务
+        for uid in at_users:
+            tasks.append(self._get_avatar(uid))
 
-        if self.config.get("debug_mode", False):
-            try:
-                seg_info = []
-                for seg in primary_segments:
-                    if isinstance(seg, dict):
-                        seg_info.append(f"dict:{seg.get('type')} keys={list(seg.keys())}")
-                    else:
-                        seg_info.append(f"{seg.__class__.__name__}")
-                logger.info(
-                    f"[get_images] reply_imgs={reply_count} current_imgs={current_count} avatars={avatar_count} total={len(images)} segments={seg_info} raw_segments={len(raw_segments)}"
-                )
-            except Exception:
-                pass
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for res in results:
+                if isinstance(res, bytes):
+                    images.append(res)
         
         return images
+
+    def _count_image_inputs(self, event: AstrMessageEvent) -> int:
+        """轻量统计本条消息可能会用到的图片数量（不下载）。用于手动命令的早失败校验。"""
+        image_count = 0
+        at_users: set[str] = set()
+
+        chain = []
+        if hasattr(event, "message_obj") and hasattr(event.message_obj, "message"):
+            chain = event.message_obj.message or []
+        elif hasattr(event, "get_messages"):
+            try:
+                chain = event.get_messages() or []
+            except Exception:
+                chain = []
+
+        ignore_id = str(event.get_self_id()).strip() if hasattr(event, "get_self_id") else ""
+
+        for seg in chain:
+            # 回复链：仅统计图片（与 get_images 行为保持一致）
+            if isinstance(seg, Reply) and getattr(seg, "chain", None):
+                for s in seg.chain:
+                    if isinstance(s, Image):
+                        image_count += 1
+                    elif isinstance(s, dict) and s.get("type") == "image":
+                        image_count += 1
+                continue
+
+            # 当前消息图片
+            if isinstance(seg, Image):
+                image_count += 1
+                continue
+            if isinstance(seg, dict) and seg.get("type") == "image":
+                image_count += 1
+                continue
+
+            # @用户（会吃头像）
+            if isinstance(seg, At):
+                qq = str(getattr(seg, "qq", "")).strip()
+                if not qq or qq == "all":
+                    continue
+                if ignore_id and qq == ignore_id:
+                    continue
+                at_users.add(qq)
+
+        # 文本中 @数字 兜底（与 get_images 同口径）
+        try:
+            text = event.get_message_str() if hasattr(event, "get_message_str") else getattr(event, "message_str", "")
+            if text:
+                for qq in re.findall(r"@(\d+)", str(text)):
+                    qq = str(qq).strip()
+                    if not qq:
+                        continue
+                    if ignore_id and qq == ignore_id:
+                        continue
+                    at_users.add(qq)
+        except Exception:
+            pass
+
+        return image_count + len(at_users)
     
-    def _bytes_to_base64(self, data: bytes, mime: str = "image/jpeg") -> str:
+    def _detect_image_mime(self, data: bytes) -> str:
+        """Best-effort mime guess from magic numbers."""
+        if not data:
+            return "image/jpeg"
+        if data[:3] == b"\xff\xd8\xff":
+            return "image/jpeg"
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return "image/png"
+        if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+            return "image/gif"
+        if data.startswith(b"RIFF") and len(data) >= 12 and data[8:12] == b"WEBP":
+            return "image/webp"
+        if data.startswith(b"BM"):
+            return "image/bmp"
+        return "image/jpeg"
+
+    def _bytes_to_base64(self, data: bytes, mime: str | None = None) -> str:
         """转换为base64 URL格式"""
+        if not mime:
+            mime = self._detect_image_mime(data)
         b64 = base64.b64encode(data).decode()
         return f"data:{mime};base64,{b64}"
     
@@ -890,14 +894,28 @@ class Main(Star):
         """压缩大图，限制最大尺寸与体积"""
         if PILImage is None:
             return data
+        # Fast-path: already JPEG, small enough and within max_size -> keep original bytes.
+        if data[:3] == b"\xff\xd8\xff" and len(data) <= size_threshold:
+            try:
+                img = PILImage.open(io.BytesIO(data))
+                width, height = img.size
+                if width <= max_size and height <= max_size:
+                    return data
+            except Exception:
+                return data
         try:
             img = PILImage.open(io.BytesIO(data))
+            if getattr(img, "is_animated", False):
+                img.seek(0)
             width, height = img.size
-            if width <= max_size and height <= max_size and len(data) <= size_threshold:
-                return data
-            # 转换为RGB
-            if img.mode in ('RGBA', 'P'):
-                img = img.convert('RGB')
+            # Convert to RGB with alpha compositing (white background) to stabilize output format.
+            if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in getattr(img, "info", {})):
+                img = img.convert("RGBA")
+                bg = PILImage.new("RGBA", img.size, (255, 255, 255, 255))
+                bg.alpha_composite(img)
+                img = bg.convert("RGB")
+            elif img.mode != "RGB":
+                img = img.convert("RGB")
             # 限制最大尺寸
             if width > max_size or height > max_size:
                 ratio = min(max_size / width, max_size / height)
@@ -999,15 +1017,6 @@ class Main(Star):
         async with self.key_lock:
             if mode == "flow":
                 return self.config.get("flow_api_key", "")
-            elif mode == "dreamina":
-                keys = self.config.get("dreamina_api_keys", [])
-                if isinstance(keys, str):
-                    keys = [k.strip() for k in keys.split(",") if k.strip()]
-                elif isinstance(keys, list):
-                    keys = [str(k).strip() for k in keys if str(k).strip()]
-                if not keys:
-                    return None
-                return ",".join(keys)
             elif mode == "gemini":
                 keys = self.config.get("gemini_api_keys", [])
                 if not keys:
@@ -1287,9 +1296,10 @@ class Main(Star):
         
         parts = [{"text": final_prompt}]
         for img in images:
+            mime = self._detect_image_mime(img)
             parts.append({
                 "inlineData": {
-                    "mimeType": "image/jpeg",
+                    "mimeType": mime,
                     "data": base64.b64encode(img).decode()
                 }
             })
@@ -1409,9 +1419,10 @@ class Main(Star):
         # 不压缩图片
         parts = [{"text": final_prompt}]
         for img in images:
+            mime = self._detect_image_mime(img)
             parts.append({
                 "inlineData": {
-                    "mimeType": "image/jpeg",
+                    "mimeType": mime,
                     "data": base64.b64encode(img).decode()
                 }
             })
@@ -1487,103 +1498,6 @@ class Main(Star):
         except Exception as e:
             return False, f"请求异常: {e}"
 
-    async def _call_dreamina_api(self, images: List[bytes], prompt: str) -> Tuple[bool, Any]:
-        """调用Dreamina API（支持base64图片）"""
-        api_url = self.config.get("dreamina_api_url", "")
-        api_key = await self._get_api_key("dreamina")
-        model = self.config.get("dreamina_default_model", "dreamina-4.5")
-
-        if not api_url or not api_key:
-            return False, "Dreamina API 未配置"
-
-        is_img2img = bool(images)
-        ratio = self._get_dreamina_ratio(images)
-
-        # 选择端点（文生图/图生图）
-        endpoint = api_url
-        if is_img2img:
-            if endpoint.endswith("/generations"):
-                endpoint = endpoint[: -len("/generations")] + "/compositions"
-            elif endpoint.endswith("/v1/images"):
-                endpoint = endpoint + "/compositions"
-            elif endpoint.endswith("/v1/images/"):
-                endpoint = endpoint + "compositions"
-        else:
-            if endpoint.endswith("/compositions"):
-                endpoint = endpoint[: -len("/compositions")] + "/generations"
-            elif endpoint.endswith("/v1/images"):
-                endpoint = endpoint + "/generations"
-            elif endpoint.endswith("/v1/images/"):
-                endpoint = endpoint + "generations"
-
-        payload: Dict[str, Any] = {
-            "model": model,
-            "prompt": prompt,
-            "ratio": ratio,
-            "response_format": "b64_json",
-        }
-        if is_img2img:
-            payload["images"] = [self._bytes_to_base64(img) for img in images]
-
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-
-        timeout = self.config.get("timeout", 120)
-        timeout_obj = aiohttp.ClientTimeout(total=timeout)
-        proxy = self.config.get("proxy_url") if self.config.get("dreamina_use_proxy") else None
-
-        if self.config.get("debug_mode", False):
-            logger.info(f"[Dreamina] 请求: url={endpoint}, model={model}, ratio={ratio}, images={len(images)}")
-
-        try:
-            session = await self._get_session()
-            async with session.post(
-                endpoint,
-                json=payload,
-                headers=headers,
-                proxy=proxy,
-                timeout=timeout_obj,
-            ) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    return False, f"API错误 ({resp.status}): {text[:200]}"
-
-                data = await resp.json()
-                if isinstance(data, dict):
-                    if "code" in data and data.get("code") not in (0, None):
-                        return False, f"Dreamina2api错误 ({data.get('code')}): {data.get('message', 'Unknown error')}"
-                    if "errmsg" in data and data.get("errmsg"):
-                        return False, f"Dreamina2api错误: {data.get('errmsg')}"
-                    if "error" in data and data.get("error"):
-                        return False, f"Dreamina2api错误: {data.get('error')}"
-                items = data.get("data", [])
-                if not items:
-                    return False, f"API返回空内容: {str(data)[:200]}"
-
-                # 优先base64
-                b64 = items[0].get("b64_json")
-                if b64:
-                    try:
-                        return True, base64.b64decode(b64)
-                    except Exception:
-                        pass
-
-                # 兼容url格式
-                img_url = items[0].get("url")
-                if img_url:
-                    img_data = await self._download_image(img_url)
-                    if img_data:
-                        return True, img_data
-                    return False, f"图片下载失败: {img_url}"
-
-                return False, "未找到可用图片数据"
-        except asyncio.TimeoutError:
-            return False, "请求超时"
-        except Exception as e:
-            return False, f"请求异常: {e}"
-    
     async def generate(self, mode: str, images: List[bytes], prompt: str, resolution: str | None = None) -> Tuple[bool, Any]:
         """统一生成入口（带重试机制，指数退避）"""
         enable_retry = self.config.get("enable_retry", True)
@@ -1607,12 +1521,12 @@ class Main(Star):
         if not enable_retry:
             if mode == "flow":
                 success, result = await self._call_flow_api(images, prompt)
-            elif mode == "dreamina":
-                success, result = await self._call_dreamina_api(images, prompt)
             elif mode == "gemini":
                 success, result = await self._call_gemini_api(images, prompt, resolution)
-            else:
+            elif mode == "generic":
                 success, result = await self._call_generic_api(images, prompt, resolution)
+            else:
+                return False, f"不支持的模式: {mode}"
             if success:
                 if self.config.get("debug_mode", False):
                     logger.info(f"[{mode}] 生成成功 (单次尝试)")
@@ -1622,12 +1536,12 @@ class Main(Star):
         for attempt in range(max_retries):
             if mode == "flow":
                 success, result = await self._call_flow_api(images, prompt)
-            elif mode == "dreamina":
-                success, result = await self._call_dreamina_api(images, prompt)
             elif mode == "gemini":
                 success, result = await self._call_gemini_api(images, prompt, resolution)
-            else:
+            elif mode == "generic":
                 success, result = await self._call_generic_api(images, prompt, resolution)
+            else:
+                return False, f"不支持的模式: {mode}"
             
             if success:
                 if self.config.get("debug_mode", False):
@@ -1636,6 +1550,10 @@ class Main(Star):
             
             last_error = result
             error_str = str(result)
+
+            # 503 无容量：不自动重试（即使启用了重试）
+            if ("API错误 (503)" in error_str or " 503" in error_str or "\"code\": 503" in error_str) and ("No capacity available" in error_str):
+                return False, result
             
             # 如果是不可重试的错误，直接返回
             if any(err in error_str for err in non_retryable):
@@ -1778,8 +1696,6 @@ class Main(Star):
             return "generic", cmd[1:]
         elif cmd.startswith("g"):
             return "gemini", cmd[1:]
-        elif cmd.startswith("d"):
-            return "dreamina", cmd[1:]
         return None, cmd  # 无前缀
 
     def _parse_mode_token(self, token: str | None) -> str | None:
@@ -1803,27 +1719,27 @@ class Main(Star):
             "gemini": "gemini",
             "g模式": "gemini",
             "gemini模式": "gemini",
-            "d": "dreamina",
-            "dreamina": "dreamina",
-            "d模式": "dreamina",
-            "dreamina模式": "dreamina",
         }
         return mapping.get(text)
     
     def _get_effective_mode(self, requested_mode: str | None, user_id: str, group_id: str) -> str:
         """获取实际使用的模式"""
+        supported = {"flow", "generic", "gemini"}
         # 如果指定了模式，检查权限
         if requested_mode:
-            return requested_mode
+            return requested_mode if requested_mode in supported else "flow"
         
         # 无前缀时
         if limit_manager.is_user_whitelisted(user_id, self.config):
-            return self.config.get("default_mode", "generic")
+            m = self.config.get("default_mode", "generic")
+            return m if m in supported else "generic"
         if limit_manager.is_group_whitelisted(group_id, self.config):
-            return self.config.get("default_mode", "generic")
+            m = self.config.get("default_mode", "generic")
+            return m if m in supported else "generic"
         
         # 普通用户使用配置的默认模式
-        return self.config.get("normal_user_default_mode", "flow")
+        m = self.config.get("normal_user_default_mode", "flow")
+        return m if m in supported else "flow"
     
     def _check_mode_enabled(self, mode: str) -> Tuple[bool, str]:
         """
@@ -1835,12 +1751,13 @@ class Main(Star):
             "flow": "enable_flow_mode",
             "generic": "enable_generic_mode",
             "gemini": "enable_gemini_mode",
-            "dreamina": "enable_dreamina_mode"
         }
+
+        if mode not in mode_switch:
+            available_names = ["Flow (f)", "Generic (o)", "Gemini (g)"]
+            return False, f"❌ 不支持的模式: {mode}\n💡 可用模式: {', '.join(available_names)}"
         
         enabled = self.config.get(mode_switch[mode], True)
-        if mode == "dreamina" and mode_switch[mode] not in self.config:
-            enabled = False
 
         if not enabled:
             # 找出当前可用的模式
@@ -1856,7 +1773,6 @@ class Main(Star):
                 "flow": "Flow (f)",
                 "generic": "Generic (o)",
                 "gemini": "Gemini (g)",
-                "dreamina": "Dreamina (d)"
             }
             
             current_name = mode_names[mode]
@@ -1876,55 +1792,6 @@ class Main(Star):
         if text in {"1K", "2K", "4K"}:
             return text
         return None
-
-    def _get_dreamina_ratio(self, images: List[bytes]) -> str:
-        """获取Dreamina比例（自动或固定比例）"""
-        ratio = self.config.get("dreamina_ratio", "自动")
-        ratio_text = str(ratio).strip()
-        if not ratio_text:
-            ratio_text = "自动"
-
-        # 允许中英文自动标记
-        if ratio_text.lower() in {"auto", "自动"}:
-            if images and PILImage is not None:
-                try:
-                    img = PILImage.open(io.BytesIO(images[0]))
-                    width, height = img.size
-                    if height and width:
-                        return self._match_dreamina_ratio(width, height)
-                except Exception:
-                    pass
-            return "1:1"
-
-        # 固定比例
-        supported = {
-            "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "21:9"
-        }
-        if ratio_text in supported:
-            return ratio_text
-
-        logger.warning(f"[Dreamina] 不支持的比例: {ratio_text}, 回退到 1:1")
-        return "1:1"
-
-    def _match_dreamina_ratio(self, width: int, height: int) -> str:
-        """根据宽高匹配Dreamina标准比例"""
-        aspect = width / height if height else 1.0
-        ratio_map = {
-            "1:1": 1.0,
-            "4:3": 4 / 3,
-            "3:4": 3 / 4,
-            "16:9": 16 / 9,
-            "9:16": 9 / 16,
-            "3:2": 3 / 2,
-            "2:3": 2 / 3,
-            "21:9": 21 / 9,
-        }
-        # 优先匹配接近比例
-        for key, val in ratio_map.items():
-            if abs(aspect - val) < 0.1:
-                return key
-        # 否则选最接近的
-        return min(ratio_map.keys(), key=lambda k: abs(aspect - ratio_map[k]))
 
     def _get_llm_cache_key(self, event: AstrMessageEvent) -> str:
         """获取LLM图片缓存Key（会话粒度）"""
@@ -1953,12 +1820,15 @@ class Main(Star):
 
     def _get_llm_cache_max_entries(self) -> int:
         """获取LLM图片缓存最大条数"""
-        limit = self.config.get("llm_last_image_max_entries", 100)
+        limit = self.config.get("llm_last_image_max_entries", 5)
         try:
             limit = int(limit)
         except Exception:
-            limit = 100
-        return max(0, limit)
+            limit = 5
+        # 强制上限 5（全局缓存），避免内存占用过大
+        if limit <= 0:
+            limit = 5
+        return min(max(1, limit), 5)
 
     def _prune_llm_cache(self):
         """清理过期或超限的LLM图片缓存"""
@@ -1967,42 +1837,34 @@ class Main(Star):
         now = time.time()
         ttl = self._get_llm_cache_ttl()
         if ttl > 0:
-            for key, entry in list(self.llm_last_image_cache.items()):
-                ts = entry.get("ts", 0)
-                if now - ts > ttl:
-                    self.llm_last_image_cache.pop(key, None)
+            kept: Deque[Dict[str, Any]] = deque()
+            for entry in list(self.llm_last_image_cache):
+                ts = entry.get("ts", 0) or 0
+                if now - ts <= ttl:
+                    kept.append(entry)
+            self.llm_last_image_cache = kept
 
         max_entries = self._get_llm_cache_max_entries()
-        if max_entries > 0 and len(self.llm_last_image_cache) > max_entries:
-            items = sorted(
-                self.llm_last_image_cache.items(),
-                key=lambda kv: kv[1].get("ts", 0)
-            )
-            for key, _ in items[: max(0, len(items) - max_entries)]:
-                self.llm_last_image_cache.pop(key, None)
+        while len(self.llm_last_image_cache) > max_entries:
+            try:
+                self.llm_last_image_cache.popleft()
+            except Exception:
+                break
 
-    def _set_llm_last_image(self, cache_key: str, image_bytes: bytes):
-        """写入LLM“上一次图片”缓存"""
-        if not cache_key or not image_bytes:
+    def _set_llm_last_image(self, image_bytes: bytes):
+        """写入LLM“上一次图片”缓存（全局）"""
+        if not image_bytes:
             return
-        self._prune_llm_cache()
-        self.llm_last_image_cache[cache_key] = {
-            "image": image_bytes,
-            "ts": time.time(),
-        }
+        self.llm_last_image_cache.append({"image": image_bytes, "ts": time.time()})
         self._prune_llm_cache()
 
-    def _get_llm_last_image(self, cache_key: str) -> bytes | None:
-        """读取LLM“上一次图片”缓存"""
-        if not cache_key:
-            return None
+    def _get_llm_last_image(self) -> bytes | None:
+        """读取LLM“上一次图片”缓存（全局最新一张）"""
         self._prune_llm_cache()
-        entry = self.llm_last_image_cache.get(cache_key)
-        if not entry:
+        if not self.llm_last_image_cache:
             return None
-        ttl = self._get_llm_cache_ttl()
-        if ttl > 0 and time.time() - entry.get("ts", 0) > ttl:
-            self.llm_last_image_cache.pop(cache_key, None)
+        entry = self.llm_last_image_cache[-1]
+        if not isinstance(entry, dict):
             return None
         entry["ts"] = time.time()
         return entry.get("image")
@@ -2045,12 +1907,6 @@ class Main(Star):
         """Gemini模式文生图"""
         async for result in self._handle_text2img(event, "gemini"):
             yield result
-
-    @filter.command("d文", alias={"d文生图"})
-    async def cmd_dreamina_text2img(self, event: AstrMessageEvent):
-        """Dreamina模式文生图"""
-        async for result in self._handle_text2img(event, "dreamina"):
-            yield result
     
     @filter.command("文生图", alias={"文"})
     async def cmd_default_text2img(self, event: AstrMessageEvent):
@@ -2080,11 +1936,15 @@ class Main(Star):
         
         # 提取提示词并清理@用户信息
         raw = event.get_message_str().strip()
-        prompt = re.sub(r'^[fogd]?文(生图)?\s*', '', raw, flags=re.IGNORECASE).strip()
+        prompt = re.sub(r'^[#/]*[fog]?文(生图)?\s*', '', raw, flags=re.IGNORECASE).strip()
         prompt = self._clean_prompt(prompt, event)
         
         if not prompt:
             yield event.plain_result("❌ 请输入描述\n用法: #f文 一只可爱的猫")
+            return
+
+        if len(prompt) >= MAX_PROMPT_LEN:
+            yield event.plain_result(f"❌ 提示词过长（需少于{MAX_PROMPT_LEN}字符）")
             return
         
         # 次数检查
@@ -2093,18 +1953,21 @@ class Main(Star):
             yield event.plain_result(f"❌ {limit_msg}")
             return
         
-        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini", "dreamina": "Dreamina"}[actual_mode]
+        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini"}.get(actual_mode, str(actual_mode))
         
         # 并发控制 - 白名单用户不受限制
         is_whitelisted = limit_manager.is_user_whitelisted(user_id, self.config)
-        mode_lock = self.mode_locks[actual_mode]
+        mode_lock = self.mode_locks.get(actual_mode)
+        if mode_lock is None:
+            yield event.plain_result(f"❌ 不支持的模式: {actual_mode}")
+            return
         
         if not is_whitelisted and mode_lock.locked():
             yield event.plain_result(f"⏳ [{mode_name}] 当前有其他用户正在生成，请稍候...")
             return
         
         async def do_generate():
-            yield event.plain_result(f"🎨 [{mode_name}] 文生图: {prompt[:20]}...")
+            await self._safe_send_plain(event, f"🎨 [{mode_name}] 文生图: {prompt[:20]}...")
             
             start = time.time()
             success, result = await self.generate(actual_mode, [], prompt)
@@ -2119,7 +1982,8 @@ class Main(Star):
                     return
                 yield event.chain_result(chain)
             else:
-                yield event.plain_result(f"❌ [{mode_name}] 生成失败 ({elapsed:.1f}s)\n原因: {result}")
+                reason = self._humanize_error(actual_mode, result)
+                yield event.plain_result(f"❌ [{mode_name}] 生成失败 ({elapsed:.1f}s)\n原因: {reason}")
         
         if is_whitelisted:
             async for r in do_generate():
@@ -2147,12 +2011,6 @@ class Main(Star):
     async def cmd_gemini_img2img(self, event: AstrMessageEvent):
         """Gemini模式图生图"""
         async for result in self._handle_img2img(event, "gemini"):
-            yield result
-
-    @filter.command("d图", alias={"d图生图"})
-    async def cmd_dreamina_img2img(self, event: AstrMessageEvent):
-        """Dreamina模式图生图"""
-        async for result in self._handle_img2img(event, "dreamina"):
             yield result
     
     @filter.command("图生图", alias={"图"})
@@ -2183,16 +2041,30 @@ class Main(Star):
         
         # 提取提示词并清理@用户信息
         raw = event.get_message_str().strip()
-        prompt = re.sub(r'^[fogd]?图(生图)?\s*', '', raw, flags=re.IGNORECASE).strip()
+        prompt = re.sub(r'^[#/]*[fog]?图(生图)?\s*', '', raw, flags=re.IGNORECASE).strip()
         prompt = self._clean_prompt(prompt, event)
         
         if not prompt:
             prompt = "transform this image with artistic style"
+
+        if len(prompt) >= MAX_PROMPT_LEN:
+            yield event.plain_result(f"❌ 提示词过长（需少于{MAX_PROMPT_LEN}字符）")
+            return
+
+        # 早失败：图片数量过多时不下载、不扣次数
+        approx_count = self._count_image_inputs(event)
+        if approx_count > MAX_IMAGES:
+            yield event.plain_result(f"❌ 图片数量过多（最大{MAX_IMAGES}张）")
+            return
         
         # 获取图片
         images = await self.get_images(event)
         if not images:
             yield event.plain_result("❌ 请发送或引用一张图片\n用法: #f图 [发送图片]")
+            return
+
+        if len(images) > MAX_IMAGES:
+            yield event.plain_result(f"❌ 图片数量过多（最大{MAX_IMAGES}张）")
             return
         
         # 次数检查
@@ -2201,18 +2073,21 @@ class Main(Star):
             yield event.plain_result(f"❌ {limit_msg}")
             return
         
-        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini", "dreamina": "Dreamina"}[actual_mode]
+        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini"}.get(actual_mode, str(actual_mode))
         
         # 并发控制 - 白名单用户不受限制
         is_whitelisted = limit_manager.is_user_whitelisted(user_id, self.config)
-        mode_lock = self.mode_locks[actual_mode]
+        mode_lock = self.mode_locks.get(actual_mode)
+        if mode_lock is None:
+            yield event.plain_result(f"❌ 不支持的模式: {actual_mode}")
+            return
         
         if not is_whitelisted and mode_lock.locked():
             yield event.plain_result(f"⏳ [{mode_name}] 当前有其他用户正在生成，请稍候...")
             return
         
         async def do_generate():
-            yield event.plain_result(f"🎨 [{mode_name}] 图生图: {len(images)}张图片...")
+            await self._safe_send_plain(event, f"🎨 [{mode_name}] 图生图: {len(images)}张图片...")
             
             start = time.time()
             success, result = await self.generate(actual_mode, images, prompt)
@@ -2227,7 +2102,8 @@ class Main(Star):
                     return
                 yield event.chain_result(chain)
             else:
-                yield event.plain_result(f"❌ [{mode_name}] 生成失败 ({elapsed:.1f}s)\n原因: {result}")
+                reason = self._humanize_error(actual_mode, result)
+                yield event.plain_result(f"❌ [{mode_name}] 生成失败 ({elapsed:.1f}s)\n原因: {reason}")
         
         if is_whitelisted:
             async for r in do_generate():
@@ -2236,57 +2112,95 @@ class Main(Star):
             async with mode_lock:
                 async for r in do_generate():
                     yield r
-    
     # ================== 自定义预设命令监听器 ==================
     
     @filter.event_message_type(filter.EventMessageType.ALL, priority=5)
     async def on_custom_preset(self, event: AstrMessageEvent, ctx=None):
-        """处理自定义预设命令（从prompt_list配置加载的预设）"""
-        # 检查是否需要前缀
-        if self.config.get("prefix", True):
-            # 兼容不同版本AstrBot
-            is_wake = getattr(event, 'is_at_or_wake_command', True)
-            if not is_wake:
-                return
-        
+        """处理预设触发命令（内置预设 + prompt_list 自定义预设）。"""
+
         # 安全获取消息文本
-        text = getattr(event, 'message_str', '')
+        text = getattr(event, "message_str", "") or ""
+        if not text and hasattr(event, "get_message_str"):
+            try:
+                text = event.get_message_str() or ""
+            except Exception:
+                text = ""
         if not text:
-            text = str(event.message_obj.message) if hasattr(event, 'message_obj') else ''
-        
-        text = text.strip()
+            text = str(event.message_obj.message) if hasattr(event, "message_obj") else ""
+
+        text = str(text).strip()
         if not text:
             return
-        
-        # 提取命令词（第一个token）
+
+        # 检查是否需要前缀（兼容不同版本 AstrBot；同时显式支持 # / 前缀）
+        if self.config.get("prefix", True):
+            is_wake = getattr(event, "is_at_or_wake_command", False)
+            if not is_wake and not text.startswith(("#", "/")):
+                return
+
         tokens = text.split()
         if not tokens:
             return
-        
+
         raw_cmd = tokens[0].strip()
-        
-        # 解析命令前缀 (f/o/g/d) 和基础命令
+        if not raw_cmd:
+            return
+
+        # 去掉提示符前缀（# /）
+        cmd_token = raw_cmd.lstrip("#/").strip()
+        if not cmd_token:
+            return
+
+        mode_map = {"f": "flow", "o": "generic", "g": "gemini"}
         prefix_mode = None
-        base_cmd = raw_cmd
-        
-        if len(raw_cmd) > 1:
-            first_char = raw_cmd[0].lower()
-            if first_char in ('f', 'o', 'g', 'd'):
-                # 检查去掉前缀后的命令是否在自定义预设中
-                potential_cmd = raw_cmd[1:]
-                if potential_cmd in self.prompt_map:
-                    prefix_mode = {"f": "flow", "o": "generic", "g": "gemini", "d": "dreamina"}.get(first_char)
-                    base_cmd = potential_cmd
-        
-        # 检查是否匹配自定义预设（排除已硬编码的内置预设命令）
-        if base_cmd not in self.prompt_map:
-            return  # 不是自定义预设，让其他处理器处理
-        
-        # 排除内置预设（它们有专门的@filter.command装饰器）
-        if base_cmd in self.builtin_presets:
-            return  # 内置预设由专门的命令处理器处理
-        
-        # 是自定义预设，处理它
+        base_cmd = cmd_token
+
+        # 支持 "#f 鬼图" 这种写法
+        if cmd_token.lower() in mode_map and len(tokens) >= 2:
+            prefix_mode = mode_map[cmd_token.lower()]
+            base_cmd = tokens[1].strip().lstrip("#/").strip()
+        else:
+            # 支持 "#f鬼图" / "/g痛车化"
+            if len(cmd_token) > 1 and cmd_token[0].lower() in mode_map:
+                prefix_mode = mode_map[cmd_token[0].lower()]
+                base_cmd = cmd_token[1:].strip().lstrip("#/").strip()
+
+        if not base_cmd:
+            return
+
+        # 避免自定义预设抢占系统命令
+        reserved_cmds = {
+            "文", "文生图",
+            "图", "图生图",
+            "随机", "随机预设",
+            "查询次数",
+            "预设列表",
+            "生图帮助",
+            "生图菜单",
+            "切换到", "切换默认", "切换默认模式",
+            "翻译开关",
+        }
+        if base_cmd in reserved_cmds:
+            return
+
+        preset_name = None
+        if base_cmd in self.builtin_presets or base_cmd in self.prompt_map:
+            preset_name = base_cmd
+        else:
+            # ASCII 预设名做一次不区分大小写匹配，减少歧义
+            lower = base_cmd.lower()
+            for k in list(self.builtin_presets.keys()) + list(self.prompt_map.keys()):
+                try:
+                    if k.lower() == lower:
+                        preset_name = k
+                        break
+                except Exception:
+                    continue
+
+        if not preset_name:
+            return
+
+        # 是预设触发，处理它
         user_id = event.get_sender_id()
         group_id = event.get_group_id()
         
@@ -2297,7 +2211,7 @@ class Main(Star):
             mode = self._get_effective_mode(None, user_id, group_id)
         
         # 调用预设处理
-        async for r in self._handle_preset(event, mode, base_cmd):
+        async for r in self._handle_preset(event, mode, preset_name):
             yield r
         
         # 停止事件传播
@@ -2305,34 +2219,6 @@ class Main(Star):
     
     # ================== 预设命令 ==================
 
-    
-    @filter.command("f手办化")
-    async def cmd_flow_figurine(self, event: AstrMessageEvent):
-        async for r in self._handle_preset(event, "flow", "手办化"):
-            yield r
-    
-    @filter.command("o手办化")
-    async def cmd_generic_figurine(self, event: AstrMessageEvent):
-        async for r in self._handle_preset(event, "generic", "手办化"):
-            yield r
-    
-    @filter.command("g手办化")
-    async def cmd_gemini_figurine(self, event: AstrMessageEvent):
-        async for r in self._handle_preset(event, "gemini", "手办化"):
-            yield r
-
-    @filter.command("d手办化")
-    async def cmd_dreamina_figurine(self, event: AstrMessageEvent):
-        async for r in self._handle_preset(event, "dreamina", "手办化"):
-            yield r
-    
-    @filter.command("手办化")
-    async def cmd_default_figurine(self, event: AstrMessageEvent):
-        user_id = event.get_sender_id()
-        group_id = event.get_group_id()
-        mode = self._get_effective_mode(None, user_id, group_id)
-        async for r in self._handle_preset(event, mode, "手办化"):
-            yield r
     
     async def _handle_preset(self, event: AstrMessageEvent, mode: str, preset_name: str):
         """处理预设命令"""
@@ -2353,6 +2239,16 @@ class Main(Star):
         
         # 获取预设提示词
         prompt = self.prompt_map.get(preset_name) or self.builtin_presets.get(preset_name, preset_name)
+
+        if len(prompt) >= MAX_PROMPT_LEN:
+            yield event.plain_result(f"❌ 提示词过长（需少于{MAX_PROMPT_LEN}字符）")
+            return
+
+        # 早失败：图片数量过多时不下载、不扣次数
+        approx_count = self._count_image_inputs(event)
+        if approx_count > MAX_IMAGES:
+            yield event.plain_result(f"❌ 图片数量过多（最大{MAX_IMAGES}张）")
+            return
         
         # 获取图片
         images = await self.get_images(event)
@@ -2363,6 +2259,10 @@ class Main(Star):
             else:
                 yield event.plain_result("❌ 请发送或引用一张图片")
                 return
+
+        if len(images) > MAX_IMAGES:
+            yield event.plain_result(f"❌ 图片数量过多（最大{MAX_IMAGES}张）")
+            return
         
         # 次数检查
         ok, limit_msg = limit_manager.check_and_consume(user_id, group_id, self.config)
@@ -2370,18 +2270,21 @@ class Main(Star):
             yield event.plain_result(f"❌ {limit_msg}")
             return
         
-        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini", "dreamina": "Dreamina"}[actual_mode]
+        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini"}.get(actual_mode, str(actual_mode))
         
         # 并发控制 - 白名单用户不受限制
         is_whitelisted = limit_manager.is_user_whitelisted(user_id, self.config)
-        mode_lock = self.mode_locks[actual_mode]
+        mode_lock = self.mode_locks.get(actual_mode)
+        if mode_lock is None:
+            yield event.plain_result(f"❌ 不支持的模式: {actual_mode}")
+            return
         
         if not is_whitelisted and mode_lock.locked():
             yield event.plain_result(f"⏳ [{mode_name}] 当前有其他用户正在生成，请稍候...")
             return
         
         async def do_generate():
-            yield event.plain_result(f"🎨 [{mode_name}] {preset_name}...")
+            await self._safe_send_plain(event, f"🎨 [{mode_name}] {preset_name}...")
             
             start = time.time()
             success, result = await self.generate(actual_mode, images, prompt)
@@ -2396,7 +2299,8 @@ class Main(Star):
                     return
                 yield event.chain_result(chain)
             else:
-                yield event.plain_result(f"❌ [{mode_name}] {preset_name}失败 ({elapsed:.1f}s)\n原因: {result}")
+                reason = self._humanize_error(actual_mode, result)
+                yield event.plain_result(f"❌ [{mode_name}] {preset_name}失败 ({elapsed:.1f}s)\n原因: {reason}")
         
         if is_whitelisted:
             async for r in do_generate():
@@ -2415,29 +2319,16 @@ class Main(Star):
         remaining = limit_manager.get_user_remaining(user_id, self.config)
         yield event.plain_result(f"👤 用户: {user_id}\n📊 今日剩余: {remaining}")
     
-    @filter.command("f切换模型")
-    async def cmd_switch_flow_model(self, event: AstrMessageEvent):
-        """切换Flow模式模型"""
-        model_list = self.config.get("flow_model_list", [])
-        if not model_list:
-            yield event.plain_result("❌ Flow模式模型列表为空")
-            return
-        
-        self.flow_current_model_index = (self.flow_current_model_index + 1) % len(model_list)
-        current = model_list[self.flow_current_model_index]
-        
-        msg = "🔄 Flow模式模型已切换\n"
-        for i, m in enumerate(model_list):
-            prefix = "➤ " if i == self.flow_current_model_index else "  "
-            msg += f"{prefix}{i+1}. {m}\n"
-        
-        yield event.plain_result(msg)
-    
     @filter.command("f翻译开关")
     async def cmd_toggle_translate(self, event: AstrMessageEvent):
         """切换翻译功能"""
         current = self.config.get("flow_enable_translate", False)
         self.config["flow_enable_translate"] = not current
+        if hasattr(self.config, "save_config"):
+            try:
+                self.config.save_config()
+            except Exception:
+                pass
         status = "开启" if not current else "关闭"
         yield event.plain_result(f"🌐 翻译功能已{status}")
 
@@ -2447,7 +2338,7 @@ class Main(Star):
         raw = event.get_message_str().strip()
         target = re.sub(r"^切换到\s*", "", raw, flags=re.IGNORECASE).strip()
         if not target:
-            yield event.plain_result("用法: #切换到 f/o/g/d")
+            yield event.plain_result("用法: #切换到 f/o/g")
             return
         target = target.split()[0]
 
@@ -2473,7 +2364,7 @@ class Main(Star):
         msg = "📜 可用预设列表\n━━━━━━━━━━\n"
         msg += f"📌 内置: {', '.join(builtin)}\n"
         msg += f"✨ 自定义: {', '.join(custom) if custom else '(无)'}\n"
-        msg += "━━━━━━━━━━\n用法: #f<预设名> [图片]"
+        msg += "━━━━━━━━━━\n用法: #<预设名> [图片] 或 #f<预设名> [图片]（也兼容 / 前缀）"
         
         yield event.plain_result(msg)
     
@@ -2492,14 +2383,14 @@ class Main(Star):
 #f文 <描述>      文字生成图片
 #f图 [图片]      图片风格转换
 #f随机 [图片]    随机预设效果
+#<预设名> [图片]  预设效果（如 #鬼图 / #fQ版化，兼容 / 前缀）
 
 ━━━━ 🔀 API模式 ━━━━
 f = Flow (自动横竖版，支持翻译)
 o = Generic (仅白名单)
 g = Gemini (仅白名单, 4K输出)
-d = Dreamina (仅白名单, 比例可配置)
 
-例: #o文 <描述>  #g图 [图片]  #d文 <描述>
+例: #o文 <描述>  #g图 [图片]
 
 ━━━━ ⚙️ 权限/并发 ━━━━
 普通用户: 仅 #f 命令，有并发限制
@@ -2515,12 +2406,11 @@ d = Dreamina (仅白名单, 比例可配置)
 #查询次数 | #预设列表
 #生图菜单 | #生图帮助
 #切换到 f/o/g
-#f切换模型 | #f翻译开关
+#f翻译开关
 
 ━━━━ 🤖 LLM提示 ━━━━
 继续改图: 说“继续修改/基于上次”
 分辨率: resolution=1K/2K/4K (仅Generic/Gemini)
-Dreamina比例: 配置 dreamina_ratio (自动/固定)
 限制: 提示词<900, 图片<=10"""
         yield event.plain_result(menu)
     
@@ -2563,17 +2453,6 @@ Dreamina比例: 配置 dreamina_ratio (自动/固定)
         preset = random.choice(all_presets)
         async for r in self._handle_preset(event, "gemini", preset):
             yield r
-
-    @filter.command("d随机")
-    async def cmd_dreamina_random(self, event: AstrMessageEvent):
-        """Dreamina模式随机预设"""
-        all_presets = self._get_all_presets()
-        if not all_presets:
-            yield event.plain_result("❌ 暂无可用预设")
-            return
-        preset = random.choice(all_presets)
-        async for r in self._handle_preset(event, "dreamina", preset):
-            yield r
     
     @filter.command("随机", alias={"随机预设"})
     async def cmd_default_random(self, event: AstrMessageEvent):
@@ -2611,7 +2490,7 @@ Dreamina比例: 配置 dreamina_ratio (自动/固定)
         参数选择原则（给AI用）：
         - 有用户发图：优先设 use_message_images=true，不需要 image_urls。
         - 有头像/公网参考图：用 image_urls（如先 get_avatar 得到头像URL）。
-        - 继续改上一张：只有用户明确提到“沿用上一张/继续上一张/按上一张修改”等时才可设 use_last_image=true，且必须没有新图。
+        - 继续改上一张：只有用户明确提到“沿用上一张/继续上一张/按上一张修改”等时才可设 use_last_image=true，且必须没有新图（全局最近一张）。
         - 想要分辨率：仅用户明确要求时再传 resolution。
         
         使用流程示例：
@@ -2623,13 +2502,12 @@ Dreamina比例: 配置 dreamina_ratio (自动/固定)
         
         重要注意：
         - 图片生成后系统会自动发送，不要发送链接或URL给用户。
-        - gchat.qpic.cn 等临时链接不可用，优先 use_message_images。
+        - gchat.qpic.cn 等临时链接可能失效，优先 use_message_images。
         - image_urls 支持 dataURL/base64://，可直接传 Base64。
         - 使用头像时，prompt 不要描述人物外貌/性别，除非用户明确要求。
         - 未明确要求画人/头像时不要调用 get_avatar。
         - 图片最多10张，提示词需少于900字符。
-        - Dreamina 使用 ratio 配置控制比例，不支持 resolution 参数。
-        - resolution 仅对 Generic/Gemini 生效，Flow/Dreamina 模式会忽略。
+        - resolution 仅对 Generic/Gemini 生效，Flow 模式会忽略。
         
         Args:
             prompt (string): 必填。画面描述或修改要求，尽量具体，长度 < 900 字符。
@@ -2653,10 +2531,11 @@ Dreamina比例: 配置 dreamina_ratio (自动/固定)
         
         user_id = event.get_sender_id()
         group_id = event.get_group_id()
-        cache_key = self._get_llm_cache_key(event)
 
         # 统一使用llm_default_mode（不区分白名单/普通用户）
         mode = self.config.get("llm_default_mode", "generic")
+        if mode not in ("flow", "generic", "gemini"):
+            mode = "generic"
         
         # 模式启用检查
         enabled, mode_err = self._check_mode_enabled(mode)
@@ -2669,7 +2548,7 @@ Dreamina比例: 配置 dreamina_ratio (自动/固定)
         if resolution and not resolution_override:
             yield event.plain_result("分辨率仅支持 1K/2K/4K")
             return
-        if resolution_override and mode in ("flow", "dreamina"):
+        if resolution_override and mode in ("flow",):
             resolution_override = None
         
         # 次数检查（按配置选择群统计或个人统计）
@@ -2732,7 +2611,7 @@ Dreamina比例: 配置 dreamina_ratio (自动/固定)
 
         # 处理“上一次图片”缓存（仅在未提供图片时）
         if not images:
-            cached = self._get_llm_last_image(cache_key)
+            cached = self._get_llm_last_image()
             if use_last_image is True:
                 if cached:
                     images = [cached]
@@ -2752,14 +2631,15 @@ Dreamina比例: 配置 dreamina_ratio (自动/固定)
         
         if success:
             # 成功：仅发送图片给用户，不发送状态消息
-            self._set_llm_last_image(cache_key, result)
+            self._set_llm_last_image(result)
             chain = [self._create_image_from_bytes(result)]
             if await self._send_chain_with_recall(event, chain):
                 return
             yield event.chain_result(chain)
         else:
-            # 失败：发送简短错误信息
-            yield event.plain_result("生成失败")
+            # 失败：发送具体原因，便于排查
+            reason = self._humanize_error(mode, result)
+            yield event.plain_result(f"❌ [{mode}] 生成失败 ({elapsed:.1f}s)\n原因: {reason}")
     
     
     
