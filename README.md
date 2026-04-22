@@ -4,7 +4,7 @@
   <p>支持 Flow/Generic/Gemini/ChatGPT2API 四种 API 模式的 AstrBot 绘图插件</p>
   <p>
     <b>作者:</b> Antigravity &nbsp;|&nbsp;
-    <b>版本:</b> 1.2.14
+    <b>版本:</b> 1.2.15
   </p>
 </div>
 
@@ -227,13 +227,14 @@ AI：好的，继续优化~ [调用 generate_image(prompt="...", use_last_image=
 
 ---
 
-## 💬 问题反馈
-
-有问题加群：1075544978
-
 ---
 
 ## 📜 更新日志
+
+### v1.2.15 (2026-04-22)
+- 修复：Flow 模式兼容 `![Generated Image](...)` markdown 图片返回
+- 修复：Flow 模式支持 `data:image/...;base64`、`base64://` 与 `b64_json` 图片返回
+- 增强：Flow 下载 URL 前会校验图片内容，避免把 XML/HTML 错误页当图片
 
 ### v1.2.14 (2026-04-22)
 - 新增：`p` / ChatGPT2API 模式，支持 `#p文`、`#p图`、`#p随机` 与 `#p<预设名>`

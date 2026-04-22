@@ -2,7 +2,7 @@
 RongheDraw 多模式绘图插件
 支持 Flow/Generic/Gemini/ChatGPT2API 四种 API 模式
 作者: Antigravity
-版本: 1.2.14
+版本: 1.2.15
 """
 import asyncio
 import base64
@@ -73,7 +73,7 @@ MODE_SWITCHES = {
     "astrbot_plugin_ronghedraw",
     "Antigravity",
     "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini/ChatGPT2API 四种 API 模式",
-    "1.2.14",
+    "1.2.15",
     "https://github.com/wangyingxuan383-ai/astrbot_plugin_ronghedraw",
 )
 class Main(Star):
@@ -910,6 +910,121 @@ class Main(Star):
             mime = self._detect_image_mime(data)
         b64 = base64.b64encode(data).decode()
         return f"data:{mime};base64,{b64}"
+
+    def _is_probable_image_bytes(self, data: bytes) -> bool:
+        """校验 Flow 返回的下载/解码结果，避免把 XML/HTML 错误页当图片发送。"""
+        if not data or len(data) < 8:
+            return False
+        if (
+            data[:3] == b"\xff\xd8\xff"
+            or data.startswith(b"\x89PNG\r\n\x1a\n")
+            or data.startswith(b"GIF87a")
+            or data.startswith(b"GIF89a")
+            or (data.startswith(b"RIFF") and len(data) >= 12 and data[8:12] == b"WEBP")
+            or data.startswith(b"BM")
+        ):
+            return True
+        if PILImage is None:
+            return False
+        try:
+            with PILImage.open(io.BytesIO(data)) as img:
+                img.verify()
+            return True
+        except Exception:
+            return False
+
+    def _normalize_flow_candidate(self, value: str) -> str:
+        """清理 markdown 图片目标中的包裹符、标题与 HTML 转义。"""
+        value = str(value or "").strip()
+        value = value.replace("&amp;", "&")
+        if value.startswith("<") and ">" in value:
+            value = value[1:value.index(">")].strip()
+        if value.startswith(("http://", "https://")):
+            value = value.split()[0].rstrip(".,;:!?)")
+        return value.strip()
+
+    def _decode_flow_image_candidate(self, value: str) -> bytes | None:
+        """解码 Flow 文本中出现的 data URL、base64:// 或纯 base64 图片。"""
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if text.startswith("data:image") and "," in text:
+            text = text.split(",", 1)[1]
+        elif text.startswith("base64://"):
+            text = text[9:]
+        else:
+            return None
+        b64 = re.sub(r"\s+", "", text)
+        if len(b64) < 64:
+            return None
+        try:
+            data = base64.b64decode(b64, validate=False)
+        except Exception:
+            return None
+        return data if self._is_probable_image_bytes(data) else None
+
+    def _extract_flow_image_candidates(self, content: str) -> List[str]:
+        """从 Flow 文本响应中提取 markdown 图片、data URL、base64 与 URL 候选。"""
+        text = str(content or "")
+        candidates: List[str] = []
+        seen = set()
+
+        def add(value: str):
+            value = self._normalize_flow_candidate(value)
+            if value and value not in seen:
+                seen.add(value)
+                candidates.append(value)
+
+        # Markdown 图片优先，兼容 ![Generated Image](url/data-url)。
+        for match in re.finditer(r"!\[[^\]]*\]\((.*?)\)", text, flags=re.S):
+            add(match.group(1))
+
+        # OpenAI/Gemini 代理常见的内联图片格式。
+        for match in re.finditer(r"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+", text):
+            add(match.group(0))
+        for match in re.finditer(r"base64://[A-Za-z0-9+/=]+", text):
+            add(match.group(0))
+
+        # JSON 文本或代码块中可能只给 b64_json/base64 字段。
+        for match in re.finditer(
+            r'"(?:b64_json|base64|image_base64)"\s*:\s*"([A-Za-z0-9+/=\\n\\r]+)"',
+            text,
+            flags=re.I,
+        ):
+            add("base64://" + match.group(1).replace("\\n", "").replace("\\r", ""))
+        for match in re.finditer(r"```(?:base64|text)?\s*([A-Za-z0-9+/=\s]{200,})\s*```", text, flags=re.I):
+            add("base64://" + match.group(1))
+
+        # URL 最后兜底。被保护的 GCS 链接会下载失败，后续候选仍会继续尝试。
+        for match in re.finditer(r'https?://[^\s<>")\\\]]+', text):
+            add(match.group(0))
+
+        return candidates
+
+    async def _resolve_flow_image_from_content(self, content: str) -> Tuple[bool, Any]:
+        """解析 Flow 响应文本并返回图片 bytes。"""
+        candidates = self._extract_flow_image_candidates(content)
+        if not candidates:
+            return False, f"未找到图片URL或base64: {content[:200]}"
+
+        failures = []
+        ordered_candidates = [
+            c for c in candidates if not c.startswith(("http://", "https://"))
+        ] + [
+            c for c in candidates if c.startswith(("http://", "https://"))
+        ]
+        for candidate in ordered_candidates:
+            decoded = self._decode_flow_image_candidate(candidate)
+            if decoded:
+                return True, decoded
+
+            if candidate.startswith(("http://", "https://")):
+                img_data = await self._download_image(candidate)
+                if img_data and self._is_probable_image_bytes(img_data):
+                    return True, img_data
+                failures.append(candidate[:120])
+
+        return False, f"图片候选均无法读取: {', '.join(failures[:3]) or content[:150]}"
     
 
     def _create_image_from_bytes(self, data: bytes) -> Image:
@@ -1148,9 +1263,9 @@ class Main(Star):
                     text = await resp.text()
                     return False, f"API错误 ({resp.status}): {text[:200]}"
                 
-                # 解析流式响应（兼容SSE分片）
+                # 解析完整流式响应（兼容 SSE 分片）。不要在第一个 URL 处提前停止，
+                # Flow 有时会先输出 markdown 链接，后续再补 dataURL/base64 图片。
                 full_content = ""
-                found_url = None
                 buffer = ""
                 done = False
                 async for chunk in resp.content.iter_chunked(1024):
@@ -1172,30 +1287,24 @@ class Main(Star):
                                 delta = chunk_json["choices"][0].get("delta", {})
                                 if "content" in delta:
                                     full_content += delta["content"]
-                                    if "http" in full_content:
-                                        url_match = re.search(r'https?://[^\s<>")\\]]+', full_content)
-                                        if url_match:
-                                            found_url = url_match.group(0).rstrip(".,;:!?)")
-                                            break
                         except Exception:
                             continue
-                    if found_url or done:
+                    if done:
                         break
-                
-                # 提取图片URL
-                img_url = found_url
-                if not img_url:
-                    url_match = re.search(r'https?://[^\s<>")\\]]+', full_content)
-                    if url_match:
-                        img_url = url_match.group(0).rstrip(".,;:!?)")
-                
-                if img_url:
-                    img_data = await self._download_image(img_url)
-                    if img_data:
-                        return True, img_data
-                    return False, f"图片下载失败: {img_url}"
-                
-                return False, f"未找到图片URL: {full_content[:200]}"
+
+                # 兼容极少数服务端最后一行没有换行的 SSE 数据。
+                tail = buffer.strip()
+                if tail.startswith("data:") and tail[5:].strip() != "[DONE]":
+                    try:
+                        chunk_json = json.loads(tail[5:].strip())
+                        if "choices" in chunk_json and chunk_json["choices"]:
+                            delta = chunk_json["choices"][0].get("delta", {})
+                            if "content" in delta:
+                                full_content += delta["content"]
+                    except Exception:
+                        pass
+
+                return await self._resolve_flow_image_from_content(full_content)
         
         except asyncio.TimeoutError:
             return False, "请求超时"

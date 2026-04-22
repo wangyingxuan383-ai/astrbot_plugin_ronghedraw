@@ -406,6 +406,6 @@
         "description": "【帮助】帮助文本",
         "type": "text",
         "editor_mode": true,
-        "default": "🎨 RongheDraw 绘图插件\n\n━━ 快速开始 ━━\n#f文 <描述>      Flow文字生成图片\n#p文 <描述>      ChatGPT2API文字生成图片\n#f图 [图片]      Flow图片风格转换\n#p图 [图片]      ChatGPT2API图片编辑\n#f随机 [图片]    Flow随机预设效果\n#p随机 [图片]    ChatGPT2API随机预设效果\n#<预设名> [图片] 预设效果（支持 #/ 前缀与 f/o/g/p 指定模式）\n\n━━ API模式 ━━\nf = Flow (自动横竖版，支持翻译)\no = Generic (仅白名单)\ng = Gemini (仅白名单, 4K输出)\np = ChatGPT2API (OpenAI图片兼容, 默认gpt-image-2)\n\n示例: #o文 <描述>  #g图 [图片]  #p文 <描述>\n示例: #鬼图  #fQ版化  /g痛车化  #p手办化\n\n━━ 权限 ━━\n普通用户: 仅 #f 命令，若普通默认模式设为p则可用 #p\n白名单: 所有模式\n\n━━ 管理 ━━\n#查询次数 | #预设列表\n#生图菜单 | #生图帮助\n#切换到 f/o/g/p\n#f翻译开关\n\n━━ 输入限制 ━━\n提示词 < 900 字符\n图片 <= 10 张\n\n━━ LLM提示 ━━\n继续改图: 说“继续修改/基于上次”\n分辨率: resolution=1K/2K/4K (仅Generic/Gemini)\n\n有问题加群：1075544978"
+        "default": "🎨 RongheDraw 绘图插件\n\n━━ 快速开始 ━━\n#f文 <描述>      Flow文字生成图片\n#p文 <描述>      ChatGPT2API文字生成图片\n#f图 [图片]      Flow图片风格转换\n#p图 [图片]      ChatGPT2API图片编辑\n#f随机 [图片]    Flow随机预设效果\n#p随机 [图片]    ChatGPT2API随机预设效果\n#<预设名> [图片] 预设效果（支持 #/ 前缀与 f/o/g/p 指定模式）\n\n━━ API模式 ━━\nf = Flow (自动横竖版，支持翻译)\no = Generic (仅白名单)\ng = Gemini (仅白名单, 4K输出)\np = ChatGPT2API (OpenAI图片兼容, 默认gpt-image-2)\n\n示例: #o文 <描述>  #g图 [图片]  #p文 <描述>\n示例: #鬼图  #fQ版化  /g痛车化  #p手办化\n\n━━ 权限 ━━\n普通用户: 仅 #f 命令，若普通默认模式设为p则可用 #p\n白名单: 所有模式\n\n━━ 管理 ━━\n#查询次数 | #预设列表\n#生图菜单 | #生图帮助\n#切换到 f/o/g/p\n#f翻译开关\n\n━━ 输入限制 ━━\n提示词 < 900 字符\n图片 <= 10 张\n\n━━ LLM提示 ━━\n继续改图: 说“继续修改/基于上次”\n分辨率: resolution=1K/2K/4K (仅Generic/Gemini)"
     }
 }
