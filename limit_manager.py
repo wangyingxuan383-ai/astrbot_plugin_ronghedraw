@@ -7,6 +7,13 @@ import datetime
 import os
 import json
 
+MODE_PREFIXES = {
+    "flow": "f",
+    "generic": "o",
+    "gemini": "g",
+    "p": "p",
+}
+
 # 使用标准数据目录（符合AstrBot规范）
 _db_file = None
 _db_initialized = False
@@ -124,7 +131,7 @@ def check_permission(user_id: str, group_id: str, requested_mode: str, config: d
         # 生成提示信息
         mode_hints = ["#f*"]
         if normal_default != "flow":
-            mode_hints.append(f"#{normal_default[0]}*")
+            mode_hints.append(f"#{MODE_PREFIXES.get(normal_default, normal_default[:1])}*")
         hint = f"普通用户可用: {', '.join(mode_hints)}"
         return False, "flow", f"❌ 此命令需要白名单权限\n💡 {hint}"
     

@@ -1,8 +1,8 @@
 """
 RongheDraw 多模式绘图插件
-支持 Flow/Generic/Gemini 三种 API 模式
+支持 Flow/Generic/Gemini/ChatGPT2API 四种 API 模式
 作者: Antigravity
-版本: 1.2.13
+版本: 1.2.14
 """
 import asyncio
 import base64
@@ -44,17 +44,43 @@ from . import limit_manager
 # Input limits (align with LLM tool defaults).
 MAX_PROMPT_LEN = 900
 MAX_IMAGES = 10
+P_DEFAULT_API_BASE_URL = "http://localhost:3010/v1"
+P_DEFAULT_API_KEY = ""
+P_DEFAULT_MODEL = "gpt-image-2"
+
+SUPPORTED_MODES = {"flow", "generic", "gemini", "p"}
+MODE_DISPLAY_NAMES = {
+    "flow": "Flow",
+    "generic": "Generic",
+    "gemini": "Gemini",
+    "p": "P / ChatGPT2API",
+}
+MODE_SHORT_NAMES = {
+    "flow": "f",
+    "generic": "o",
+    "gemini": "g",
+    "p": "p",
+}
+MODE_SWITCHES = {
+    "flow": "enable_flow_mode",
+    "generic": "enable_generic_mode",
+    "gemini": "enable_gemini_mode",
+    "p": "enable_p_mode",
+}
 
 
 @register(
     "astrbot_plugin_ronghedraw",
     "Antigravity",
-    "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini 三种 API 模式",
-    "1.2.13",
+    "RongheDraw 多模式绘图插件 - 支持 Flow/Generic/Gemini/ChatGPT2API 四种 API 模式",
+    "1.2.14",
     "https://github.com/wangyingxuan383-ai/astrbot_plugin_ronghedraw",
 )
 class Main(Star):
     """RongheDraw 多模式绘图插件"""
+
+    LOCAL_CPA_DOMAINS = {"ai.jinyao91.top"}
+    LOCAL_CPA_BASE_URL = "http://172.17.0.1:8317"
     
     # ================== 初始化 ==================
     
@@ -72,7 +98,8 @@ class Main(Star):
         self.mode_locks = {
             "flow": asyncio.Lock(),
             "generic": asyncio.Lock(),
-            "gemini": asyncio.Lock()
+            "gemini": asyncio.Lock(),
+            "p": asyncio.Lock(),
         }
         
         # 加载预设
@@ -127,19 +154,32 @@ class Main(Star):
         """验证必需配置"""
         has_api = (self.config.get("flow_api_url") or 
                    self.config.get("generic_api_url") or 
-                   self.config.get("gemini_api_url"))
+                   self.config.get("gemini_api_url") or
+                   self.config.get("p_api_base_url"))
         if not has_api:
             logger.warning("[RongheDraw] WARNING: No API URL configured, plugin functionality limited")
 
+    def _resolve_local_cpa_base_url(self, base_url: str) -> str:
+        """Use the Docker host bridge for same-server CPA calls."""
+        base = str(base_url or "").strip()
+        try:
+            host = urlsplit(base).hostname
+        except Exception:
+            host = None
+
+        if host in self.LOCAL_CPA_DOMAINS:
+            logger.info(f"[RongheDraw] 使用本机 CPA 内网地址: {host} -> {self.LOCAL_CPA_BASE_URL}")
+            return self.LOCAL_CPA_BASE_URL
+        return base
+
     def _apply_default_mode(self, mode: str, source: str = "manual") -> str:
         """应用默认模式切换（白名单/普通用户/LLM统一）"""
-        supported = {"flow", "generic", "gemini"}
-        if mode not in supported:
+        if mode not in SUPPORTED_MODES:
             return str(mode)
         self.config["llm_default_mode"] = mode
         self.config["normal_user_default_mode"] = mode
         self.config["default_mode"] = mode
-        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini"}.get(mode, mode)
+        mode_name = MODE_DISPLAY_NAMES.get(mode, mode)
         if self.config.get("debug_mode", False):
             logger.info(f"[RongheDraw] 默认模式切换为 {mode_name} ({source})")
         return mode_name
@@ -1017,6 +1057,8 @@ class Main(Star):
         async with self.key_lock:
             if mode == "flow":
                 return self.config.get("flow_api_key", "")
+            elif mode == "p":
+                return self.config.get("p_api_key", P_DEFAULT_API_KEY)
             elif mode == "gemini":
                 keys = self.config.get("gemini_api_keys", [])
                 if not keys:
@@ -1162,15 +1204,17 @@ class Main(Star):
     
     async def _call_generic_api(self, images: List[bytes], prompt: str, resolution_override: str | None = None) -> Tuple[bool, Any]:
         """调用Generic API (支持OpenAI格式和Gemini原生格式)"""
-        api_url = self.config.get("generic_api_url", "")
+        api_url = str(self.config.get("generic_api_url", "")).strip()
         api_key = await self._get_api_key("generic")
-        model = self.config.get("generic_default_model", "nano-banana")
-        api_format = self.config.get("generic_api_format", "openai")
-        resolution = resolution_override or self.config.get("generic_resolution", "1K")
-        aspect_ratio = self.config.get("generic_aspect_ratio", "自动")
+        model = str(self.config.get("generic_default_model", "nano-banana")).strip()
+        api_format = str(self.config.get("generic_api_format", "openai")).strip().lower()
+        resolution = str(resolution_override or self.config.get("generic_resolution", "1K")).strip() or "1K"
+        aspect_ratio = str(self.config.get("generic_aspect_ratio", "自动")).strip()
         
         if not api_url or not api_key:
             return False, "Generic API 未配置"
+        if not model:
+            return False, "Generic 模型未配置"
         
         # 根据API格式选择不同的调用方式
         if api_format == "gemini":
@@ -1182,6 +1226,12 @@ class Main(Star):
                                           images: List[bytes], prompt: str, 
                                           resolution: str, aspect_ratio: str) -> Tuple[bool, Any]:
         """Generic模式 - OpenAI格式调用"""
+        model = str(model).strip()
+        resolution = str(resolution).strip() or "1K"
+        aspect_ratio = str(aspect_ratio).strip()
+        if not model:
+            return False, "Generic 模型未配置"
+
         # 构建消息
         if images:
             final_prompt = f"Re-imagine the attached image: {prompt}. Draw it directly."
@@ -1235,15 +1285,58 @@ class Main(Star):
                 if self.config.get("debug_mode", False):
                     logger.info(f"[Generic] 响应: {str(result)[:500]}")
                 
-                # 提取内容
-                full_content = ""
+                message = {}
                 if "choices" in result and result["choices"]:
-                    message = result["choices"][0].get("message", {})
-                    full_content = message.get("content", "")
+                    message = result["choices"][0].get("message", {}) or {}
+
+                # 先尝试兼容 OpenAI 图片字段: message.images[].image_url.url
+                msg_images = message.get("images", [])
+                if isinstance(msg_images, list):
+                    for image_item in msg_images:
+                        if not isinstance(image_item, dict):
+                            continue
+                        image_url_obj = image_item.get("image_url")
+                        image_url = ""
+                        if isinstance(image_url_obj, dict):
+                            image_url = str(image_url_obj.get("url", "")).strip()
+                        elif isinstance(image_url_obj, str):
+                            image_url = image_url_obj.strip()
+                        elif isinstance(image_item.get("url"), str):
+                            image_url = image_item.get("url", "").strip()
+
+                        if not image_url:
+                            continue
+
+                        if image_url.startswith("data:image") and "," in image_url:
+                            try:
+                                return True, base64.b64decode(image_url.split(",", 1)[1])
+                            except Exception:
+                                pass
+
+                        if image_url.startswith("http://") or image_url.startswith("https://"):
+                            img_data = await self._download_image(image_url)
+                            if img_data:
+                                return True, img_data
+
+                # 回退提取 content 中的图片链接/内联 base64
+                full_content = ""
+                content_obj = message.get("content", "")
+                if isinstance(content_obj, list):
+                    chunks = []
+                    for part in content_obj:
+                        if isinstance(part, str):
+                            chunks.append(part)
+                        elif isinstance(part, dict):
+                            text = part.get("text")
+                            if isinstance(text, str):
+                                chunks.append(text)
+                    full_content = "\n".join(chunks)
+                else:
+                    full_content = str(content_obj or "")
                 
                 # 检查空响应
                 if not full_content or not full_content.strip():
-                    return False, "API返回空内容"
+                    return False, "API返回空内容（未找到 message.images 或 message.content 图片）"
                 
                 # 提取base64或URL
                 b64_match = re.search(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+', full_content)
@@ -1272,9 +1365,15 @@ class Main(Star):
                                            images: List[bytes], prompt: str,
                                            resolution: str, aspect_ratio: str) -> Tuple[bool, Any]:
         """Generic模式 - Gemini原生格式调用"""
+        model = str(model).strip()
+        resolution = str(resolution).strip() or "1K"
+        aspect_ratio = str(aspect_ratio).strip()
+        if not model:
+            return False, "Generic 模型未配置"
+
         # 构建URL - 需要清理OpenAI格式的路径，重构为Gemini格式
-        # 例如: https://api.bltcy.ai/v1/chat/completions -> https://api.bltcy.ai/v1beta/models/{model}:generateContent
-        base = api_url.rstrip("/")
+        # 例如: https://api.example.com/v1/chat/completions -> https://api.example.com/v1beta/models/{model}:generateContent
+        base = str(api_url).strip().rstrip("/")
         
         # 移除OpenAI格式的路径后缀
         for suffix in ["/chat/completions", "/completions", "/images/generations"]:
@@ -1374,9 +1473,49 @@ class Main(Star):
                 
                 # 如果代理API返回OpenAI格式，尝试提取
                 if "choices" in data:
-                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    message = data.get("choices", [{}])[0].get("message", {}) or {}
+
+                    msg_images = message.get("images", [])
+                    if isinstance(msg_images, list):
+                        for image_item in msg_images:
+                            if not isinstance(image_item, dict):
+                                continue
+                            image_url_obj = image_item.get("image_url")
+                            image_url = ""
+                            if isinstance(image_url_obj, dict):
+                                image_url = str(image_url_obj.get("url", "")).strip()
+                            elif isinstance(image_url_obj, str):
+                                image_url = image_url_obj.strip()
+                            elif isinstance(image_item.get("url"), str):
+                                image_url = image_item.get("url", "").strip()
+
+                            if image_url.startswith("data:image") and "," in image_url:
+                                try:
+                                    return True, base64.b64decode(image_url.split(",", 1)[1])
+                                except Exception:
+                                    pass
+
+                            if image_url.startswith("http://") or image_url.startswith("https://"):
+                                img_data = await self._download_image(image_url)
+                                if img_data:
+                                    return True, img_data
+
+                    content_obj = message.get("content", "")
+                    if isinstance(content_obj, list):
+                        chunks = []
+                        for part in content_obj:
+                            if isinstance(part, str):
+                                chunks.append(part)
+                            elif isinstance(part, dict):
+                                text = part.get("text")
+                                if isinstance(text, str):
+                                    chunks.append(text)
+                        content = "\n".join(chunks)
+                    else:
+                        content = str(content_obj or "")
+
                     if not content or not content.strip():
-                        return False, "API返回空内容"
+                        return False, "API返回空内容（OpenAI兼容响应未找到图片）"
                     # 尝试从content中提取图片
                     b64_match = re.search(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+', content)
                     if b64_match:
@@ -1394,13 +1533,17 @@ class Main(Star):
     
     async def _call_gemini_api(self, images: List[bytes], prompt: str, resolution_override: str | None = None) -> Tuple[bool, Any]:
         """调用Gemini官方API（支持4K分辨率）"""
-        base_url = self.config.get("gemini_api_url", "https://generativelanguage.googleapis.com")
+        base_url = self._resolve_local_cpa_base_url(
+            str(self.config.get("gemini_api_url", "https://generativelanguage.googleapis.com")).strip()
+        )
         api_key = await self._get_api_key("gemini")
-        model = self.config.get("gemini_default_model", "gemini-2.5-flash-preview-image")
-        resolution = resolution_override or self.config.get("gemini_resolution", "4K")
+        model = str(self.config.get("gemini_default_model", "gemini-2.5-flash-preview-image")).strip()
+        resolution = str(resolution_override or self.config.get("gemini_resolution", "4K")).strip() or "4K"
         
         if not api_key:
             return False, "Gemini API Key 未配置"
+        if not model:
+            return False, "Gemini 模型未配置"
         
         base = base_url.rstrip("/")
         if not base.endswith("v1beta"):
@@ -1498,6 +1641,112 @@ class Main(Star):
         except Exception as e:
             return False, f"请求异常: {e}"
 
+    def _get_p_image_count(self) -> int:
+        """获取 ChatGPT2API 单次图片数量，限制在兼容接口允许的 1-4。"""
+        count = self.config.get("p_image_count", 1)
+        try:
+            count = int(count)
+        except Exception:
+            count = 1
+        return min(max(count, 1), 4)
+
+    async def _call_p_api(self, images: List[bytes], prompt: str) -> Tuple[bool, Any]:
+        """调用 ChatGPT2API OpenAI 兼容图片接口。"""
+        api_base_url = str(self.config.get("p_api_base_url", P_DEFAULT_API_BASE_URL)).strip()
+        api_key = await self._get_api_key("p")
+        model = str(self.config.get("p_default_model", P_DEFAULT_MODEL)).strip()
+        response_format = str(self.config.get("p_response_format", "b64_json")).strip() or "b64_json"
+        image_count = self._get_p_image_count()
+
+        if not api_base_url:
+            return False, "P API 地址未配置"
+        if not api_key:
+            return False, "P API Key 未配置"
+        if not model:
+            return False, "P 模型未配置"
+
+        base = api_base_url.rstrip("/")
+        for suffix in ("/images/generations", "/images/edits"):
+            if base.endswith(suffix):
+                base = base[: -len(suffix)].rstrip("/")
+
+        endpoint = f"{base}/images/edits" if images else f"{base}/images/generations"
+        headers = {"Authorization": f"Bearer {api_key}"}
+        timeout = self.config.get("timeout", 120)
+        timeout_obj = aiohttp.ClientTimeout(total=timeout)
+        proxy = self.config.get("proxy_url") if self.config.get("p_use_proxy") else None
+
+        if self.config.get("debug_mode", False):
+            logger.info(f"[P] 请求: endpoint={endpoint}, model={model}, n={image_count}, images={len(images)}")
+
+        try:
+            session = await self._get_session()
+            if images:
+                form = aiohttp.FormData()
+                form.add_field("model", model)
+                form.add_field("prompt", prompt)
+                form.add_field("n", str(image_count))
+                for index, img in enumerate(images, start=1):
+                    mime = self._detect_image_mime(img)
+                    ext = mime.split("/", 1)[1] if "/" in mime else "png"
+                    form.add_field(
+                        "image",
+                        img,
+                        filename=f"image_{index}.{ext}",
+                        content_type=mime,
+                    )
+                request_kwargs = {"data": form, "headers": headers}
+            else:
+                headers = {**headers, "Content-Type": "application/json"}
+                request_kwargs = {
+                    "json": {
+                        "model": model,
+                        "prompt": prompt,
+                        "n": image_count,
+                        "response_format": response_format,
+                    },
+                    "headers": headers,
+                }
+
+            async with session.post(
+                endpoint,
+                proxy=proxy,
+                timeout=timeout_obj,
+                **request_kwargs,
+            ) as resp:
+                text = await resp.text()
+                if resp.status != 200:
+                    return False, f"API错误 ({resp.status}): {text[:200]}"
+
+                try:
+                    data = json.loads(text)
+                except Exception:
+                    return False, f"API返回非JSON: {text[:200]}"
+
+                items = data.get("data") if isinstance(data, dict) else None
+                if not isinstance(items, list) or not items:
+                    return False, f"响应中未找到图片: {str(data)[:200]}"
+
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    b64_json = str(item.get("b64_json") or "").strip()
+                    if not b64_json:
+                        continue
+                    if b64_json.startswith("data:image") and "," in b64_json:
+                        b64_json = b64_json.split(",", 1)[1]
+                    try:
+                        return True, base64.b64decode(b64_json)
+                    except Exception:
+                        continue
+
+                return False, "响应中未找到 b64_json 图片数据"
+
+        except asyncio.TimeoutError:
+            return False, "请求超时"
+        except Exception as e:
+            return False, f"请求异常: {e}"
+
     async def generate(self, mode: str, images: List[bytes], prompt: str, resolution: str | None = None) -> Tuple[bool, Any]:
         """统一生成入口（带重试机制，指数退避）"""
         enable_retry = self.config.get("enable_retry", True)
@@ -1525,6 +1774,8 @@ class Main(Star):
                 success, result = await self._call_gemini_api(images, prompt, resolution)
             elif mode == "generic":
                 success, result = await self._call_generic_api(images, prompt, resolution)
+            elif mode == "p":
+                success, result = await self._call_p_api(images, prompt)
             else:
                 return False, f"不支持的模式: {mode}"
             if success:
@@ -1540,6 +1791,8 @@ class Main(Star):
                 success, result = await self._call_gemini_api(images, prompt, resolution)
             elif mode == "generic":
                 success, result = await self._call_generic_api(images, prompt, resolution)
+            elif mode == "p":
+                success, result = await self._call_p_api(images, prompt)
             else:
                 return False, f"不支持的模式: {mode}"
             
@@ -1696,6 +1949,8 @@ class Main(Star):
             return "generic", cmd[1:]
         elif cmd.startswith("g"):
             return "gemini", cmd[1:]
+        elif cmd.startswith("p"):
+            return "p", cmd[1:]
         return None, cmd  # 无前缀
 
     def _parse_mode_token(self, token: str | None) -> str | None:
@@ -1719,27 +1974,32 @@ class Main(Star):
             "gemini": "gemini",
             "g模式": "gemini",
             "gemini模式": "gemini",
+            "p": "p",
+            "p模式": "p",
+            "chatgpt": "p",
+            "chatgpt模式": "p",
+            "chatgpt2api": "p",
+            "chatgpt2api模式": "p",
         }
         return mapping.get(text)
     
     def _get_effective_mode(self, requested_mode: str | None, user_id: str, group_id: str) -> str:
         """获取实际使用的模式"""
-        supported = {"flow", "generic", "gemini"}
         # 如果指定了模式，检查权限
         if requested_mode:
-            return requested_mode if requested_mode in supported else "flow"
+            return requested_mode if requested_mode in SUPPORTED_MODES else "flow"
         
         # 无前缀时
         if limit_manager.is_user_whitelisted(user_id, self.config):
             m = self.config.get("default_mode", "generic")
-            return m if m in supported else "generic"
+            return m if m in SUPPORTED_MODES else "generic"
         if limit_manager.is_group_whitelisted(group_id, self.config):
             m = self.config.get("default_mode", "generic")
-            return m if m in supported else "generic"
+            return m if m in SUPPORTED_MODES else "generic"
         
         # 普通用户使用配置的默认模式
         m = self.config.get("normal_user_default_mode", "flow")
-        return m if m in supported else "flow"
+        return m if m in SUPPORTED_MODES else "flow"
     
     def _check_mode_enabled(self, mode: str) -> Tuple[bool, str]:
         """
@@ -1747,14 +2007,10 @@ class Main(Star):
         
         返回: (是否启用, 错误提示)
         """
-        mode_switch = {
-            "flow": "enable_flow_mode",
-            "generic": "enable_generic_mode",
-            "gemini": "enable_gemini_mode",
-        }
+        mode_switch = MODE_SWITCHES
 
         if mode not in mode_switch:
-            available_names = ["Flow (f)", "Generic (o)", "Gemini (g)"]
+            available_names = [f"{MODE_DISPLAY_NAMES[m]} ({MODE_SHORT_NAMES[m]})" for m in MODE_DISPLAY_NAMES]
             return False, f"❌ 不支持的模式: {mode}\n💡 可用模式: {', '.join(available_names)}"
         
         enabled = self.config.get(mode_switch[mode], True)
@@ -1769,11 +2025,7 @@ class Main(Star):
             if not available:
                 return False, "❌ 所有绘图模式均已关闭"
             
-            mode_names = {
-                "flow": "Flow (f)",
-                "generic": "Generic (o)",
-                "gemini": "Gemini (g)",
-            }
+            mode_names = {m: f"{MODE_DISPLAY_NAMES[m]} ({MODE_SHORT_NAMES[m]})" for m in MODE_DISPLAY_NAMES}
             
             current_name = mode_names[mode]
             available_names = [mode_names[m] for m in available]
@@ -1907,6 +2159,12 @@ class Main(Star):
         """Gemini模式文生图"""
         async for result in self._handle_text2img(event, "gemini"):
             yield result
+
+    @filter.command("p文", alias={"p文生图"})
+    async def cmd_p_text2img(self, event: AstrMessageEvent):
+        """ChatGPT2API模式文生图"""
+        async for result in self._handle_text2img(event, "p"):
+            yield result
     
     @filter.command("文生图", alias={"文"})
     async def cmd_default_text2img(self, event: AstrMessageEvent):
@@ -1936,7 +2194,7 @@ class Main(Star):
         
         # 提取提示词并清理@用户信息
         raw = event.get_message_str().strip()
-        prompt = re.sub(r'^[#/]*[fog]?文(生图)?\s*', '', raw, flags=re.IGNORECASE).strip()
+        prompt = re.sub(r'^[#/]*[fogp]?文(生图)?\s*', '', raw, flags=re.IGNORECASE).strip()
         prompt = self._clean_prompt(prompt, event)
         
         if not prompt:
@@ -1953,7 +2211,7 @@ class Main(Star):
             yield event.plain_result(f"❌ {limit_msg}")
             return
         
-        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini"}.get(actual_mode, str(actual_mode))
+        mode_name = MODE_DISPLAY_NAMES.get(actual_mode, str(actual_mode))
         
         # 并发控制 - 白名单用户不受限制
         is_whitelisted = limit_manager.is_user_whitelisted(user_id, self.config)
@@ -2012,6 +2270,12 @@ class Main(Star):
         """Gemini模式图生图"""
         async for result in self._handle_img2img(event, "gemini"):
             yield result
+
+    @filter.command("p图", alias={"p图生图"})
+    async def cmd_p_img2img(self, event: AstrMessageEvent):
+        """ChatGPT2API模式图生图"""
+        async for result in self._handle_img2img(event, "p"):
+            yield result
     
     @filter.command("图生图", alias={"图"})
     async def cmd_default_img2img(self, event: AstrMessageEvent):
@@ -2041,7 +2305,7 @@ class Main(Star):
         
         # 提取提示词并清理@用户信息
         raw = event.get_message_str().strip()
-        prompt = re.sub(r'^[#/]*[fog]?图(生图)?\s*', '', raw, flags=re.IGNORECASE).strip()
+        prompt = re.sub(r'^[#/]*[fogp]?图(生图)?\s*', '', raw, flags=re.IGNORECASE).strip()
         prompt = self._clean_prompt(prompt, event)
         
         if not prompt:
@@ -2073,7 +2337,7 @@ class Main(Star):
             yield event.plain_result(f"❌ {limit_msg}")
             return
         
-        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini"}.get(actual_mode, str(actual_mode))
+        mode_name = MODE_DISPLAY_NAMES.get(actual_mode, str(actual_mode))
         
         # 并发控制 - 白名单用户不受限制
         is_whitelisted = limit_manager.is_user_whitelisted(user_id, self.config)
@@ -2151,7 +2415,7 @@ class Main(Star):
         if not cmd_token:
             return
 
-        mode_map = {"f": "flow", "o": "generic", "g": "gemini"}
+        mode_map = {"f": "flow", "o": "generic", "g": "gemini", "p": "p"}
         prefix_mode = None
         base_cmd = cmd_token
 
@@ -2160,7 +2424,7 @@ class Main(Star):
             prefix_mode = mode_map[cmd_token.lower()]
             base_cmd = tokens[1].strip().lstrip("#/").strip()
         else:
-            # 支持 "#f鬼图" / "/g痛车化"
+            # 支持 "#f鬼图" / "/g痛车化" / "#p手办化"
             if len(cmd_token) > 1 and cmd_token[0].lower() in mode_map:
                 prefix_mode = mode_map[cmd_token[0].lower()]
                 base_cmd = cmd_token[1:].strip().lstrip("#/").strip()
@@ -2270,7 +2534,7 @@ class Main(Star):
             yield event.plain_result(f"❌ {limit_msg}")
             return
         
-        mode_name = {"flow": "Flow", "generic": "Generic", "gemini": "Gemini"}.get(actual_mode, str(actual_mode))
+        mode_name = MODE_DISPLAY_NAMES.get(actual_mode, str(actual_mode))
         
         # 并发控制 - 白名单用户不受限制
         is_whitelisted = limit_manager.is_user_whitelisted(user_id, self.config)
@@ -2338,13 +2602,13 @@ class Main(Star):
         raw = event.get_message_str().strip()
         target = re.sub(r"^切换到\s*", "", raw, flags=re.IGNORECASE).strip()
         if not target:
-            yield event.plain_result("用法: #切换到 f/o/g")
+            yield event.plain_result("用法: #切换到 f/o/g/p")
             return
         target = target.split()[0]
 
         mode = self._parse_mode_token(target)
         if not mode:
-            yield event.plain_result("无效模式，请输入 f/o/g 或 flow/generic/gemini")
+            yield event.plain_result("无效模式，请输入 f/o/g/p 或 flow/generic/gemini/chatgpt2api")
             return
 
         enabled, mode_err = self._check_mode_enabled(mode)
@@ -2364,7 +2628,7 @@ class Main(Star):
         msg = "📜 可用预设列表\n━━━━━━━━━━\n"
         msg += f"📌 内置: {', '.join(builtin)}\n"
         msg += f"✨ 自定义: {', '.join(custom) if custom else '(无)'}\n"
-        msg += "━━━━━━━━━━\n用法: #<预设名> [图片] 或 #f<预设名> [图片]（也兼容 / 前缀）"
+        msg += "━━━━━━━━━━\n用法: #<预设名> [图片] 或 #f/#o/#g/#p<预设名> [图片]（也兼容 / 前缀）"
         
         yield event.plain_result(msg)
     
@@ -2377,20 +2641,24 @@ class Main(Star):
     @filter.command("生图菜单")
     async def cmd_menu(self, event: AstrMessageEvent):
         """显示菜单"""
-        menu = """🎨 RongheDraw 绘图插件 v1.2.13
+        menu = """🎨 RongheDraw 绘图插件 v1.2.14
 
 ━━━━ 📌 快速开始 ━━━━
 #f文 <描述>      文字生成图片
 #f图 [图片]      图片风格转换
 #f随机 [图片]    随机预设效果
+#p文 <描述>      ChatGPT2API 文生图
+#p图 [图片]      ChatGPT2API 图生图
+#p随机 [图片]    ChatGPT2API 随机预设
 #<预设名> [图片]  预设效果（如 #鬼图 / #fQ版化，兼容 / 前缀）
 
 ━━━━ 🔀 API模式 ━━━━
 f = Flow (自动横竖版，支持翻译)
 o = Generic (仅白名单)
 g = Gemini (仅白名单, 4K输出)
+p = ChatGPT2API (OpenAI图片兼容, 默认 gpt-image-2)
 
-例: #o文 <描述>  #g图 [图片]
+例: #o文 <描述>  #g图 [图片]  #p文 <描述>
 
 ━━━━ ⚙️ 权限/并发 ━━━━
 普通用户: 仅 #f 命令，有并发限制
@@ -2405,7 +2673,7 @@ g = Gemini (仅白名单, 4K输出)
 ━━━━ 🔧 管理 ━━━━
 #查询次数 | #预设列表
 #生图菜单 | #生图帮助
-#切换到 f/o/g
+#切换到 f/o/g/p
 #f翻译开关
 
 ━━━━ 🤖 LLM提示 ━━━━
@@ -2452,6 +2720,17 @@ g = Gemini (仅白名单, 4K输出)
             return
         preset = random.choice(all_presets)
         async for r in self._handle_preset(event, "gemini", preset):
+            yield r
+
+    @filter.command("p随机")
+    async def cmd_p_random(self, event: AstrMessageEvent):
+        """ChatGPT2API模式随机预设"""
+        all_presets = self._get_all_presets()
+        if not all_presets:
+            yield event.plain_result("❌ 暂无可用预设")
+            return
+        preset = random.choice(all_presets)
+        async for r in self._handle_preset(event, "p", preset):
             yield r
     
     @filter.command("随机", alias={"随机预设"})
@@ -2507,7 +2786,7 @@ g = Gemini (仅白名单, 4K输出)
         - 使用头像时，prompt 不要描述人物外貌/性别，除非用户明确要求。
         - 未明确要求画人/头像时不要调用 get_avatar。
         - 图片最多10张，提示词需少于900字符。
-        - resolution 仅对 Generic/Gemini 生效，Flow 模式会忽略。
+        - resolution 仅对 Generic/Gemini 生效，Flow/P 模式会忽略。
         
         Args:
             prompt (string): 必填。画面描述或修改要求，尽量具体，长度 < 900 字符。
@@ -2534,7 +2813,7 @@ g = Gemini (仅白名单, 4K输出)
 
         # 统一使用llm_default_mode（不区分白名单/普通用户）
         mode = self.config.get("llm_default_mode", "generic")
-        if mode not in ("flow", "generic", "gemini"):
+        if mode not in SUPPORTED_MODES:
             mode = "generic"
         
         # 模式启用检查
@@ -2548,7 +2827,7 @@ g = Gemini (仅白名单, 4K输出)
         if resolution and not resolution_override:
             yield event.plain_result("分辨率仅支持 1K/2K/4K")
             return
-        if resolution_override and mode in ("flow",):
+        if resolution_override and mode in ("flow", "p"):
             resolution_override = None
         
         # 次数检查（按配置选择群统计或个人统计）

@@ -55,7 +55,7 @@
         "description": "【Generic模式】API地址",
         "type": "string",
         "hint": "Generic模式(OpenAI通用格式)专用。",
-        "default": "https://api.bltcy.ai/v1/chat/completions"
+        "default": "https://api.example.com/v1/chat/completions"
     },
     "generic_api_keys": {
         "description": "【Generic模式】API Key池",
@@ -145,6 +145,43 @@
         "hint": "启用后使用imageConfig设置分辨率（推荐，适配CPA渠道）。关闭则使用aspectRatio方式（旧版官方）。",
         "default": true
     },
+    "p_api_base_url": {
+        "description": "【P模式】ChatGPT2API地址",
+        "type": "string",
+        "hint": "ChatGPT2API OpenAI兼容图片API根地址，通常以 /v1 结尾；Docker内访问宿主机时可改为宿主机网关地址。",
+        "default": "http://localhost:3010/v1"
+    },
+    "p_api_key": {
+        "description": "【P模式】ChatGPT2API密钥",
+        "type": "string",
+        "hint": "chatgpt2api 的 auth-key，请求时会作为 Bearer Token 使用。请勿公开真实密钥。",
+        "default": ""
+    },
+    "p_default_model": {
+        "description": "【P模式】默认模型",
+        "type": "string",
+        "hint": "ChatGPT2API 图片模型，默认使用 gpt-image-2，也可改为 gpt-image-1。",
+        "default": "gpt-image-2",
+        "options": [
+            "gpt-image-2",
+            "gpt-image-1"
+        ]
+    },
+    "p_image_count": {
+        "description": "【P模式】单次图片数量",
+        "type": "int",
+        "hint": "ChatGPT2API 单次返回图片数量，后端支持 1-4。",
+        "default": 1
+    },
+    "p_response_format": {
+        "description": "【P模式】响应格式",
+        "type": "string",
+        "hint": "当前插件按 b64_json 解码图片。",
+        "default": "b64_json",
+        "options": [
+            "b64_json"
+        ]
+    },
     "default_mode": {
         "description": "【通用】白名单默认API模式",
         "type": "string",
@@ -153,7 +190,8 @@
         "options": [
             "flow",
             "generic",
-            "gemini"
+            "gemini",
+            "p"
         ]
     },
     "normal_user_default_mode": {
@@ -164,13 +202,14 @@
         "options": [
             "flow",
             "generic",
-            "gemini"
+            "gemini",
+            "p"
         ]
     },
     "default_mode_schedule": {
         "description": "【通用】定时切换默认模式",
         "type": "list",
-        "hint": "格式: HH:MM=模式 (支持 f/o/g 或 flow/generic/gemini)。每天该时间自动切换，可多条。",
+        "hint": "格式: HH:MM=模式 (支持 f/o/g/p 或 flow/generic/gemini/chatgpt2api)。每天该时间自动切换，可多条。",
         "items": {
             "type": "string"
         },
@@ -192,6 +231,12 @@
         "description": "【模式开关】启用Gemini模式",
         "type": "bool",
         "hint": "关闭后，所有g开头的指令和Gemini模式将不可用。",
+        "default": true
+    },
+    "enable_p_mode": {
+        "description": "【模式开关】启用P模式",
+        "type": "bool",
+        "hint": "关闭后，所有p开头的指令和ChatGPT2API模式将不可用。",
         "default": true
     },
     "daily_limit": {
@@ -240,7 +285,8 @@
         "options": [
             "flow",
             "generic",
-            "gemini"
+            "gemini",
+            "p"
         ]
     },
     "llm_tool_use_group_limit": {
@@ -312,6 +358,12 @@
         "hint": "Gemini模式是否使用代理。",
         "default": true
     },
+    "p_use_proxy": {
+        "description": "【P模式】启用代理",
+        "type": "bool",
+        "hint": "P模式是否使用代理。对接本机ChatGPT2API时通常关闭。",
+        "default": false
+    },
     "proxy_url": {
         "description": "【网络】代理地址",
         "type": "string",
@@ -354,6 +406,6 @@
         "description": "【帮助】帮助文本",
         "type": "text",
         "editor_mode": true,
-        "default": "🎨 RongheDraw 绘图插件\n\n━━ 快速开始 ━━\n#f文 <描述>      文字生成图片\n#f图 [图片]      图片风格转换\n#f随机 [图片]    随机预设效果\n#<预设名> [图片] 预设效果（支持 #/ 前缀与 f/o/g 指定模式）\n\n━━ API模式 ━━\nf = Flow (自动横竖版，支持翻译)\no = Generic (仅白名单)\ng = Gemini (仅白名单, 4K输出)\n\n示例: #o文 <描述>  #g图 [图片]\n示例: #鬼图  #fQ版化  /g痛车化\n\n━━ 权限 ━━\n普通用户: 仅 #f 命令\n白名单: 所有模式\n\n━━ 管理 ━━\n#查询次数 | #预设列表\n#生图菜单 | #生图帮助\n#切换到 f/o/g\n#f翻译开关\n\n━━ 输入限制 ━━\n提示词 < 900 字符\n图片 <= 10 张\n\n━━ LLM提示 ━━\n继续改图: 说“继续修改/基于上次”\n分辨率: resolution=1K/2K/4K (仅Generic/Gemini)\n\n有问题加群：1075544978"
+        "default": "🎨 RongheDraw 绘图插件\n\n━━ 快速开始 ━━\n#f文 <描述>      Flow文字生成图片\n#p文 <描述>      ChatGPT2API文字生成图片\n#f图 [图片]      Flow图片风格转换\n#p图 [图片]      ChatGPT2API图片编辑\n#f随机 [图片]    Flow随机预设效果\n#p随机 [图片]    ChatGPT2API随机预设效果\n#<预设名> [图片] 预设效果（支持 #/ 前缀与 f/o/g/p 指定模式）\n\n━━ API模式 ━━\nf = Flow (自动横竖版，支持翻译)\no = Generic (仅白名单)\ng = Gemini (仅白名单, 4K输出)\np = ChatGPT2API (OpenAI图片兼容, 默认gpt-image-2)\n\n示例: #o文 <描述>  #g图 [图片]  #p文 <描述>\n示例: #鬼图  #fQ版化  /g痛车化  #p手办化\n\n━━ 权限 ━━\n普通用户: 仅 #f 命令，若普通默认模式设为p则可用 #p\n白名单: 所有模式\n\n━━ 管理 ━━\n#查询次数 | #预设列表\n#生图菜单 | #生图帮助\n#切换到 f/o/g/p\n#f翻译开关\n\n━━ 输入限制 ━━\n提示词 < 900 字符\n图片 <= 10 张\n\n━━ LLM提示 ━━\n继续改图: 说“继续修改/基于上次”\n分辨率: resolution=1K/2K/4K (仅Generic/Gemini)\n\n有问题加群：1075544978"
     }
 }

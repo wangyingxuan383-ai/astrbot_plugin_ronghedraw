@@ -1,10 +1,10 @@
 <div align="center">
   <img src="logo.png" width="180" height="180" alt="RongheDraw Logo">
   <h1>RongheDraw 多模式绘图插件</h1>
-  <p>支持 Flow/Generic/Gemini 三种 API 模式的 AstrBot 绘图插件</p>
+  <p>支持 Flow/Generic/Gemini/ChatGPT2API 四种 API 模式的 AstrBot 绘图插件</p>
   <p>
     <b>作者:</b> Antigravity &nbsp;|&nbsp;
-    <b>版本:</b> 1.2.13
+    <b>版本:</b> 1.2.14
   </p>
 </div>
 
@@ -12,7 +12,7 @@
 
 ## ✨ 功能特点
 
-- 🔀 **三种 API 模式**：Flow / Generic / Gemini (4K)
+- 🔀 **四种 API 模式**：Flow / Generic / Gemini (4K) / ChatGPT2API
 - 🎨 **文生图 & 图生图**：支持多图输入
 - 📐 **智能模型选择**：Flow 模式根据图片比例自动选择横版/竖版模型
 - 🌐 **翻译功能**：Flow 模式支持中英翻译
@@ -46,6 +46,7 @@
 1. **Flow 模式**：`flow_api_url`、`flow_api_key`、`flow_default_model`
 2. **Generic 模式**：`generic_api_url`、`generic_api_keys`
 3. **Gemini 模式**：`gemini_api_url`、`gemini_api_keys`、`gemini_resolution` (默认4K)
+4. **P 模式**：`p_api_base_url`、`p_api_key`、`p_default_model` (默认 gpt-image-2)
 
 ---
 
@@ -57,6 +58,7 @@
 | `#f文 <描述>` | Flow 模式文生图（自动横竖版） |
 | `#o文 <描述>` | Generic 模式文生图 |
 | `#g文 <描述>` | Gemini 模式文生图 (4K) |
+| `#p文 <描述>` | ChatGPT2API 模式文生图 |
 | `#文生图 <描述>` | 默认模式 |
 
 ### 图生图
@@ -65,6 +67,7 @@
 | `#f图 [图片]` | Flow 模式（自动横竖版） |
 | `#o图 [图片]` | Generic 模式 |
 | `#g图 [图片]` | Gemini 模式 (4K) |
+| `#p图 [图片]` | ChatGPT2API 模式图片编辑 |
 | `#图生图 [图片]` | 默认模式 |
 
 ### 随机预设
@@ -73,6 +76,7 @@
 | `#f随机 [图片]` | Flow 模式随机 |
 | `#o随机 [图片]` | Generic 模式随机 |
 | `#g随机 [图片]` | Gemini 模式随机 |
+| `#p随机 [图片]` | ChatGPT2API 模式随机 |
 | `#随机 [图片]` | 默认模式随机 |
 
 > 注：随机预设会从 **内置预设** + 配置中的 `prompt_list` **自定义预设** 中随机选择
@@ -81,7 +85,7 @@
 | 用法 | 说明 |
 |------|------|
 | `#<预设名> [图片]` | 默认模式预设 |
-| `#f<预设名> [图片]` | 指定 Flow（`#o/#g` 同理） |
+| `#f<预设名> [图片]` | 指定 Flow（`#o/#g/#p` 同理） |
 | `/f<预设名> [图片]` | 兼容 `/` 前缀 |
 
 > 预设名来源：内置预设（如：`手办化/Q版化/鬼图/...`）与 `prompt_list` 自定义预设
@@ -93,7 +97,7 @@
 | `#预设列表` | 查看可用预设（内置+自定义） |
 | `#生图菜单` | 显示完整菜单 |
 | `#生图帮助` | 显示帮助 |
-| `#切换到 <f/o/g>` | 切换无前缀默认模式（白名单/普通用户/LLM） |
+| `#切换到 <f/o/g/p>` | 切换无前缀默认模式（白名单/普通用户/LLM） |
 | `#f翻译开关` | 翻译功能开关 |
 
 ---
@@ -102,9 +106,9 @@
 
 | 用户类型 | 可用模式 | 次数限制 | 并发限制 |
 |----------|----------|----------|----------|
-| 白名单用户 | 全部 (f/o/g) | ❌ 无限制 | ❌ 无限制 |
-| 白名单群聊 | 全部 (f/o/g) | ✅ 有限制 | ✅ 有限制 |
-| 普通用户 | 仅 f 模式 | ✅ 有限制 | ✅ 每模式1个 |
+| 白名单用户 | 全部 (f/o/g/p) | ❌ 无限制 | ❌ 无限制 |
+| 白名单群聊 | 全部 (f/o/g/p) | ✅ 有限制 | ✅ 有限制 |
+| 普通用户 | f 模式 + `normal_user_default_mode` | ✅ 有限制 | ✅ 每模式1个 |
 
 ---
 
@@ -133,6 +137,14 @@
 - `gemini_default_model`: 默认模型（gemini-3-pro-image-preview）
 - `gemini_resolution`: 输出分辨率 (1K/2K/4K，默认4K)
 - `gemini_use_proxy`: 启用代理（默认开启）
+
+### P / ChatGPT2API 模式配置
+- `p_api_base_url`: ChatGPT2API OpenAI 兼容图片 API 根地址，默认 `http://localhost:3010/v1`；Docker 内访问宿主机时可改为宿主机网关地址
+- `p_api_key`: ChatGPT2API `auth-key`，请勿公开真实密钥
+- `p_default_model`: 默认模型，默认 `gpt-image-2`，可改为 `gpt-image-1`
+- `p_image_count`: 单次图片数量，范围 1-4，默认 1
+- `p_response_format`: 响应格式，当前使用 `b64_json`
+- `p_use_proxy`: 启用代理，默认关闭
 
 ### LLM 配置
 - `enable_llm_tool`: 启用 LLM 工具
@@ -222,6 +234,11 @@ AI：好的，继续优化~ [调用 generate_image(prompt="...", use_last_image=
 ---
 
 ## 📜 更新日志
+
+### v1.2.14 (2026-04-22)
+- 新增：`p` / ChatGPT2API 模式，支持 `#p文`、`#p图`、`#p随机` 与 `#p<预设名>`
+- 新增：`p_api_base_url`、`p_api_key`、`p_default_model`、`p_image_count` 等配置项
+- 增强：默认模式、定时切换和 LLM 工具支持选择 `p`
 
 ### v1.2.13 (2026-01-29)
 - 修复：QQ 图片下载返回非图片内容时被误当作输入
